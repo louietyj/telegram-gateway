@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import worker, { type Env } from "../src/worker.js";
 import { exposedMethods, BLOCKED_METHODS } from "../src/mcp/methods/index.js";
+import { testDb } from "./helpers/d1.js";
 
 // No TELEGRAM_BOT_TOKEN: a request that passes the auth gate fails later with 500.
-const env: Env = { MCP_AUTH_TOKEN: "test-secret", WEBHOOK_SECRET: "hook-secret" };
+const env: Env = { DB: testDb(), MCP_AUTH_TOKEN: "test-secret", WEBHOOK_SECRET: "hook-secret" };
+const noSecrets: Env = { DB: env.DB };
 
 function mcpRequest(headers: Record<string, string> = {}, query = ""): Request {
   return new Request(`https://worker.test/mcp${query}`, {
@@ -47,7 +49,7 @@ describe("Worker /mcp auth", () => {
   });
 
   it("fails closed when MCP_AUTH_TOKEN is unset", async () => {
-    const res = await worker.fetch(mcpRequest({ authorization: "Bearer " }), {});
+    const res = await worker.fetch(mcpRequest({ authorization: "Bearer " }), noSecrets);
     expect(res.status).toBe(500);
   });
 });
@@ -65,7 +67,7 @@ describe("Worker /webhook auth", () => {
   });
 
   it("fails closed when WEBHOOK_SECRET is unset", async () => {
-    const res = await worker.fetch(webhookRequest({ "x-telegram-bot-api-secret-token": "" }), {});
+    const res = await worker.fetch(webhookRequest({ "x-telegram-bot-api-secret-token": "" }), noSecrets);
     expect(res.status).toBe(500);
   });
 });

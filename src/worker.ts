@@ -4,6 +4,7 @@
  *   POST /webhook  Telegram updates; requires the setWebhook secret_token header.
  *   POST /mcp      MCP over stateless Streamable HTTP; requires MCP_AUTH_TOKEN.
  *
+ * Bindings: DB (D1, schema in migrations/).
  * Secrets: TELEGRAM_BOT_TOKEN, MCP_AUTH_TOKEN, WEBHOOK_SECRET. All are required:
  * a missing one fails closed. Optional vars: TELEGRAM_DEFAULT_CHAT_ID,
  * TELEGRAM_DEFAULT_THREAD_ID and the tuning knobs in src/core/config.ts.
@@ -12,12 +13,16 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { loadConfig } from "./core/config.js";
 import { hasToken, safeEqual } from "./core/auth.js";
 import { buildServer } from "./mcp/server.js";
+import { D1Like } from "./store/db.js";
+import { Store } from "./store/store.js";
 
 export interface Env {
+  DB: D1Like;
   TELEGRAM_BOT_TOKEN?: string;
   MCP_AUTH_TOKEN?: string;
   WEBHOOK_SECRET?: string;
-  [key: string]: string | undefined;
+  TELEGRAM_DEFAULT_CHAT_ID?: string;
+  TELEGRAM_DEFAULT_THREAD_ID?: string;
 }
 
 function json(body: unknown, status = 200): Response {
@@ -37,14 +42,19 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
     return json({ error: "unauthorized" }, 401);
   }
 
-  let update: unknown;
+  let update: Record<string, unknown>;
   try {
-    update = await request.json();
+    update = (await request.json()) as Record<string, unknown>;
   } catch {
     return json({ error: "invalid_json" }, 400);
   }
-  // eslint-disable-next-line no-console
-  console.log("telegram_update", JSON.stringify(update));
+  // Store before acknowledging: a non-2xx makes Telegram redeliver, and ingest is idempotent.
+  try {
+    await new Store(env.DB).ingestUpdate(update, "webhook");
+  } catch (error) {
+    console.error("ingest failed", update.update_id, (error as Error).message);
+    return json({ error: "ingest_failed" }, 500);
+  }
   return json({ ok: true });
 }
 
@@ -54,7 +64,7 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
 
   let config;
   try {
-    config = loadConfig(env);
+    config = loadConfig(env as unknown as Record<string, string | undefined>);
   } catch (error) {
     return json({ error: "server_misconfigured", message: (error as Error).message }, 500);
   }

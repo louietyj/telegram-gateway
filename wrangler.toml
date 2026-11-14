@@ -6,6 +6,12 @@ compatibility_flags = ["nodejs_compat"]
 [observability]
 enabled = true
 
+[[d1_databases]]
+binding = "DB"
+database_name = "telegram-gateway"
+database_id = "TODO-set-at-first-deploy"
+migrations_dir = "migrations"
+
 # Secrets (never commit real values):
 #   wrangler secret put TELEGRAM_BOT_TOKEN
 #   wrangler secret put MCP_AUTH_TOKEN
