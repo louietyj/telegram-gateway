@@ -2,7 +2,8 @@
  * Cloudflare Worker entry point.
  *
  *   POST /webhook  Telegram updates; requires the setWebhook secret_token header.
- *   POST /mcp      MCP over stateless Streamable HTTP; requires MCP_AUTH_TOKEN.
+ *   POST /mcp      MCP over stateless Streamable HTTP; requires MCP_AUTH_TOKEN. An optional
+ *                  X-Client-Name header is recorded on the messages that client sends.
  *
  * Bindings: DB (D1, schema in migrations/).
  * Secrets: TELEGRAM_BOT_TOKEN, MCP_AUTH_TOKEN, WEBHOOK_SECRET. All are required:
@@ -69,7 +70,7 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
     return json({ error: "server_misconfigured", message: (error as Error).message }, 500);
   }
 
-  const { server, client } = buildServer(config);
+  const { server, client } = buildServer(config, new Store(env.DB), request.headers.get("x-client-name"));
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless
     enableJsonResponse: true,

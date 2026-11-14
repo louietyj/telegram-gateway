@@ -51,6 +51,20 @@ export class Store {
     await this.db.batch(statements); // one transaction
   }
 
+  /** Record messages the bot sent or edited through the Worker (a Bot API result). */
+  async recordOutgoing(result: unknown, client: string | null): Promise<void> {
+    const messages = (Array.isArray(result) ? result : [result]).filter(isMessage);
+    if (messages.length === 0) return;
+    await this.db.batch(messages.flatMap((m) => this.messageStatements(m, { outgoing: true, client })));
+  }
+
+  async markDeleted(chatId: number, messageIds: number[]): Promise<void> {
+    if (messageIds.length === 0) return;
+    await this.db.prepare(
+      `UPDATE messages SET deleted_at = ? WHERE chat_id = ? AND message_id IN (${messageIds.map(() => "?").join(",")})`
+    ).bind(now(), chatId, ...messageIds).run();
+  }
+
   private chatUpsert(chat: Json): D1StatementLike {
     const c = chatRow(chat);
     return this.db.prepare(

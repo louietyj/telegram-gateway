@@ -6,6 +6,7 @@ import { MethodDef, buildZodSchema } from "./method-registry.js";
 import { exposedMethods } from "./methods/index.js";
 import { CircuitOpenError } from "../core/circuit-breaker.js";
 import { FORMATS, findFormat, formatIndex } from "./formats.js";
+import { Store } from "../store/store.js";
 
 /** Pre-built Zod schemas for all methods (built once, reused on every call). */
 const schemaCache = new Map<string, ReturnType<typeof buildZodSchema>>();
@@ -23,24 +24,37 @@ function getSchema(
   return schema;
 }
 
+interface Context {
+  config: Config;
+  client: TelegramClient;
+  store: Store;
+  /** The caller's self-declared name, recorded on what it sends. */
+  clientName: string | null;
+}
+
 /** Build a fully-registered MCP server + its Telegram client (transport-agnostic). */
-export function buildServer(config: Config): { server: McpServer; client: TelegramClient } {
+export function buildServer(
+  config: Config,
+  store: Store,
+  clientName: string | null
+): { server: McpServer; client: TelegramClient } {
   const client = new TelegramClient(config);
+  const ctx: Context = { config, client, store, clientName };
 
   const server = new McpServer({
     name: "telegram-gateway",
     version: "0.1.0",
   });
 
-  registerAllTools(server, client, config);
+  registerAllTools(server, ctx);
   registerFormatTool(server);
 
   return { server, client };
 }
 
-function registerAllTools(server: McpServer, client: TelegramClient, config: Config): void {
+function registerAllTools(server: McpServer, ctx: Context): void {
   for (const method of exposedMethods) {
-    const zodSchema = getSchema(method, config.defaultChatId);
+    const zodSchema = getSchema(method, ctx.config.defaultChatId);
 
     const annotations = method.annotations || { destructiveHint: false };
 
@@ -50,7 +64,7 @@ function registerAllTools(server: McpServer, client: TelegramClient, config: Con
       zodSchema.shape,
       annotations,
       async (params) => {
-        return callTelegram(client, method, params as Record<string, unknown>);
+        return callTelegram(ctx, method, params as Record<string, unknown>);
       }
     );
   }
@@ -113,13 +127,19 @@ function registerFormatTool(server: McpServer): void {
 
 /** Params arrive already validated by the SDK. */
 async function callTelegram(
-  client: TelegramClient,
+  ctx: Context,
   method: MethodDef,
   params: Record<string, unknown>
 ): Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
   try {
-    const result = await client.call(method.apiMethod, params);
-    const text = formatResult(method.apiMethod, result);
+    const result = await ctx.client.call(method.apiMethod, params);
+    let text = formatResult(method.apiMethod, result);
+    try {
+      await recordOutgoing(ctx, method.apiMethod, params, result);
+    } catch (error) {
+      // The call itself succeeded; say so rather than inviting a retry that double-sends.
+      text += `\n\nWarning: sent, but not recorded in history: ${(error as Error).message}`;
+    }
     return { content: [{ type: "text", text }] };
   } catch (error) {
     const message = error instanceof CircuitOpenError
@@ -133,6 +153,22 @@ async function callTelegram(
       isError: true,
     };
   }
+}
+
+/** Bot messages never come back as updates, so the Worker records what it sends, edits and deletes. */
+async function recordOutgoing(
+  ctx: Context,
+  apiMethod: string,
+  params: Record<string, unknown>,
+  result: unknown
+): Promise<void> {
+  if (apiMethod === "deleteMessage" || apiMethod === "deleteMessages") {
+    const chatId = Number(params.chat_id ?? ctx.config.defaultChatId);
+    const ids = apiMethod === "deleteMessage" ? [params.message_id] : (params.message_ids as unknown[]);
+    if (Number.isFinite(chatId)) await ctx.store.markDeleted(chatId, ids.map(Number));
+    return;
+  }
+  await ctx.store.recordOutgoing(result, ctx.clientName);
 }
 
 const MAX_RESPONSE_LENGTH = 100_000;
