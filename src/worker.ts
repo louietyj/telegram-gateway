@@ -16,6 +16,7 @@ import { hasToken, safeEqual } from "./core/auth.js";
 import { buildServer } from "./mcp/server.js";
 import { D1Like } from "./store/db.js";
 import { Store } from "./store/store.js";
+import { Reader } from "./store/read.js";
 
 export interface Env {
   DB: D1Like;
@@ -70,7 +71,9 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
     return json({ error: "server_misconfigured", message: (error as Error).message }, 500);
   }
 
-  const { server, client } = buildServer(config, new Store(env.DB), request.headers.get("x-client-name"));
+  const { server, client } = buildServer(
+    config, new Store(env.DB), new Reader(env.DB), request.headers.get("x-client-name")
+  );
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless
     enableJsonResponse: true,

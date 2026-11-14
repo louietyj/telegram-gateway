@@ -115,12 +115,14 @@ function textOf(m: Json, kind: string): string | null {
 
 export function messageRow(m: Json): MessageRow {
   const from = m.from as Json | undefined;
-  const senderChat = m.sender_chat as Json | undefined; // channel posts, anonymous admins
+  const chat = m.chat as Json;
+  // Channel posts and anonymous admins speak as a chat, not a user.
+  const senderChat = (m.sender_chat ?? (chat.type === "channel" ? chat : undefined)) as Json | undefined;
   const reply = m.reply_to_message as Json | undefined;
   const kind = KINDS.find((k) => m[k] !== undefined) ?? "other";
 
   return {
-    chat_id: (m.chat as Json).id as number,
+    chat_id: chat.id as number,
     message_id: m.message_id as number,
     date: m.date as number,
     edit_date: num(m.edit_date),

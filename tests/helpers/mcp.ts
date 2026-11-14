@@ -3,6 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { buildServer } from "../../src/mcp/server.js";
 import { Store } from "../../src/store/store.js";
+import { Reader } from "../../src/store/read.js";
 import type { Config } from "../../src/core/config.js";
 import type { D1Like } from "../../src/store/db.js";
 
@@ -29,7 +30,7 @@ export function stubTelegram(respond: (method: string, params: Record<string, un
 }
 
 export async function connect(db: D1Like, clientName: string | null = "test") {
-  const { server } = buildServer(testConfig, new Store(db), clientName);
+  const { server } = buildServer(testConfig, new Store(db), new Reader(db), clientName);
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
   const client = new Client({ name: "test", version: "0" });

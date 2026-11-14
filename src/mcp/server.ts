@@ -7,6 +7,8 @@ import { exposedMethods } from "./methods/index.js";
 import { CircuitOpenError } from "../core/circuit-breaker.js";
 import { FORMATS, findFormat, formatIndex } from "./formats.js";
 import { Store } from "../store/store.js";
+import { Reader } from "../store/read.js";
+import { registerHistoryTools } from "./history-tools.js";
 
 /** Pre-built Zod schemas for all methods (built once, reused on every call). */
 const schemaCache = new Map<string, ReturnType<typeof buildZodSchema>>();
@@ -36,6 +38,7 @@ interface Context {
 export function buildServer(
   config: Config,
   store: Store,
+  reader: Reader,
   clientName: string | null
 ): { server: McpServer; client: TelegramClient } {
   const client = new TelegramClient(config);
@@ -48,6 +51,7 @@ export function buildServer(
 
   registerAllTools(server, ctx);
   registerFormatTool(server);
+  registerHistoryTools(server, reader);
 
   return { server, client };
 }
