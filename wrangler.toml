@@ -2,6 +2,9 @@ name = "telegram-gateway"
 main = "src/worker.ts"
 compatibility_date = "2025-09-15"
 compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+# Preview URLs would serve old versions with the live secrets.
+preview_urls = false
 
 [observability]
 enabled = true
@@ -9,13 +12,15 @@ enabled = true
 [[d1_databases]]
 binding = "DB"
 database_name = "telegram-gateway"
-database_id = "TODO-set-at-first-deploy"
+database_id = "5f55f7a0-d62f-4afa-add1-8b5659d45909"
 migrations_dir = "migrations"
 
 # Secrets (never commit real values):
 #   wrangler secret put TELEGRAM_BOT_TOKEN
 #   wrangler secret put MCP_AUTH_TOKEN
 #   wrangler secret put WEBHOOK_SECRET
+#   wrangler secret put ADMIN_TOKEN
+# The last three are kept in the gitignored secrets.env.
 
 [vars]
 # Louie's private chat with the bot: where a send without chat_id lands.
