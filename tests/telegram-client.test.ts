@@ -15,7 +15,6 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     circuitBreakerCooldown: 30000,
     allowedUploadDirs: [],
     maxFileSize: 50 * 1024 * 1024,
-    metaMode: false,
     ...overrides,
   };
 }

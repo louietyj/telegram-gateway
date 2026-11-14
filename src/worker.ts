@@ -18,35 +18,20 @@
  *                         header matches (register the same value as the
  *                         setWebhook secret_token).
  *
- * Bindings:
- *   FILES               — optional R2 bucket. When bound, download_file and
- *                         get_message_file store files there and return a
- *                         short-lived URL served at GET /files/<key>
- *                         (lifetime: FILES_TTL_SECONDS, default 3600).
- *
- * Webhook: point the bot's webhook at POST /webhook on this worker (via the
- * set_webhook MCP tool). Updates are written to the worker log (Workers
- * observability / wrangler tail). While a webhook is set, get_updates
- * returns an error on Telegram's side, so delete the webhook first if you
- * want to poll again.
- * Optional vars: TELEGRAM_DEFAULT_CHAT_ID, TELEGRAM_DEFAULT_THREAD_ID,
- * TELEGRAM_META_MODE ("true" = 2 meta-tools instead of all methods), and the
- * TELEGRAM_* tuning knobs documented in src/config.ts.
+ * Webhook: point the bot's webhook at POST /webhook on this worker. Updates
+ * are written to the worker log (Workers observability / wrangler tail).
+ * Optional vars: TELEGRAM_DEFAULT_CHAT_ID, TELEGRAM_DEFAULT_THREAD_ID, and the
+ * TELEGRAM_* tuning knobs documented in src/core/config.ts.
  */
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { loadConfig } from "./core/config.js";
 import { buildServer } from "./mcp/server.js";
-import { R2BucketLike, R2FileStore, parseTtl, serveStoredFile } from "./core/file-store.js";
 
 export interface Env {
   TELEGRAM_BOT_TOKEN?: string;
   MCP_AUTH_TOKEN?: string;
   WEBHOOK_SECRET?: string;
-  /** Optional R2 bucket for temporary files (download_file, get_message_file). */
-  FILES?: R2BucketLike;
-  /** Lifetime of a temporary file URL in seconds (default 3600). */
-  FILES_TTL_SECONDS?: string;
-  [key: string]: string | R2BucketLike | undefined;
+  [key: string]: string | undefined;
 }
 
 /**
@@ -110,10 +95,6 @@ export default {
       return json({ ok: true });
     }
 
-    const fileTtl = parseTtl(env.FILES_TTL_SECONDS);
-    const fileResponse = await serveStoredFile(request, env.FILES, fileTtl);
-    if (fileResponse) return fileResponse;
-
     if (url.pathname !== "/mcp") {
       return json({ error: "not_found" }, 404);
     }
@@ -126,15 +107,12 @@ export default {
 
     let config;
     try {
-      config = loadConfig(env as Record<string, string | undefined>);
+      config = loadConfig(env);
     } catch (error) {
       return json({ error: "server_misconfigured", message: (error as Error).message }, 500);
     }
 
-    const { server, client } = buildServer(config, {
-      noLocalFs: true,
-      fileStore: env.FILES ? new R2FileStore(env.FILES, url.origin, fileTtl) : undefined,
-    });
+    const { server, client } = buildServer(config);
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless
       enableJsonResponse: true,

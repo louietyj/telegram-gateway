@@ -1,29 +1,14 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
 import { Config } from "../core/config.js";
 import { TelegramClient, TelegramApiError } from "../telegram/telegram-client.js";
 import { MethodDef, buildZodSchema } from "./method-registry.js";
-import { allMethods, searchMethods, findMethodByApiName } from "./methods/index.js";
+import { allMethods } from "./methods/index.js";
 import { CircuitOpenError } from "../core/circuit-breaker.js";
 import { FORMATS, findFormat, formatIndex } from "./formats.js";
-import { Trail } from "../trail/trail.js";
-import { FileStore } from "../core/file-store.js";
-
-export interface ServerOptions {
-  /** Where downloaded files go when there is no local filesystem (Worker + R2). */
-  fileStore?: FileStore;
-  /** True on runtimes without a local filesystem (the Worker). */
-  noLocalFs?: boolean;
-}
 
 /** Pre-built Zod schemas for all methods (built once, reused on every call). */
 const schemaCache = new Map<string, ReturnType<typeof buildZodSchema>>();
-
-/** Module-level TRAIL instance for auto-logging in callTelegram. */
-let trailInstance: Trail | null = null;
 
 function getSchema(
   method: MethodDef,
@@ -39,47 +24,19 @@ function getSchema(
 }
 
 /** Build a fully-registered MCP server + its Telegram client (transport-agnostic). */
-export function buildServer(
-  config: Config,
-  options: ServerOptions = {}
-): { server: McpServer; client: TelegramClient } {
+export function buildServer(config: Config): { server: McpServer; client: TelegramClient } {
   const client = new TelegramClient(config);
 
   const server = new McpServer({
-    name: "telegram-api-mcp",
+    name: "telegram-gateway",
     version: "0.1.0",
   });
 
-  log("info", `Starting server in ${config.metaMode ? "meta" : "standard"} mode with ${allMethods.length} methods`);
-
-  if (config.metaMode) {
-    registerMetaTools(server, client, config);
-  } else {
-    registerAllTools(server, client, config);
-  }
-
+  registerAllTools(server, client, config);
   registerFormatTool(server);
-  trailInstance = registerTrailTools(server);
-  registerDownloadTools(server, client, config, options);
 
   return { server, client };
 }
-
-export async function startServer(config: Config): Promise<void> {
-  const { server, client } = buildServer(config);
-
-  const shutdown = () => {
-    client.destroy();
-    process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-}
-
-// ─── Standard Mode ──────────────────────────────────────────────────────
 
 function registerAllTools(server: McpServer, client: TelegramClient, config: Config): void {
   for (const method of allMethods) {
@@ -97,72 +54,6 @@ function registerAllTools(server: McpServer, client: TelegramClient, config: Con
       }
     );
   }
-}
-
-// ─── Meta Mode ──────────────────────────────────────────────────────────
-
-function registerMetaTools(server: McpServer, client: TelegramClient, config: Config): void {
-  server.tool(
-    "telegram_find",
-    "Search Telegram Bot API methods by keyword. Returns matching methods with their parameters. Use this to discover available methods before calling them.",
-    {
-      query: z.string().optional().describe("Search keyword (e.g. 'send photo', 'ban', 'poll', 'sticker')"),
-      category: z.string().optional().describe("Filter by category: messages, media, polls, chat, members, invite, forum, stickers, inline, payments, business, stories, gifts, games, bot, updates, editing, forwarding, managed_bots, passport, other"),
-    },
-    async (params) => {
-      let results = params.query ? searchMethods(params.query) : allMethods;
-
-      if (params.category) {
-        results = results.filter((m) => m.category === params.category);
-      }
-
-      if (results.length === 0) {
-        return { content: [{ type: "text" as const, text: "No methods found. Try a different keyword." }] };
-      }
-
-      const text = results
-        .slice(0, 20)
-        .map((m) => {
-          const required = m.params.filter((p) => p.required).map((p) => p.name);
-          const optional = m.params.filter((p) => !p.required).map((p) => p.name).slice(0, 5);
-          return [
-            `**${m.apiMethod}** (tool: ${m.toolName}) [${m.category}]`,
-            `  ${m.description}`,
-            `  Required: ${required.join(", ") || "none"}`,
-            `  Optional: ${optional.join(", ")}${m.params.filter((p) => !p.required).length > 5 ? " ..." : ""}`,
-            `  Returns: ${m.returns}`,
-          ].join("\n");
-        })
-        .join("\n\n");
-
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Found ${results.length} method(s):\n\n${text}${results.length > 20 ? `\n\n... and ${results.length - 20} more. Narrow your search.` : ""}`,
-        }],
-      };
-    }
-  );
-
-  server.tool(
-    "telegram_call",
-    "Call any Telegram Bot API method. Use telegram_find first to discover method names and required parameters.",
-    {
-      method: z.string().describe("API method name (e.g. sendMessage, banChatMember)"),
-      params: z.record(z.unknown()).optional().describe("Method parameters as JSON object"),
-    },
-    async (args) => {
-      const methodDef = findMethodByApiName(args.method);
-      if (!methodDef) {
-        return {
-          content: [{ type: "text" as const, text: `Unknown method: "${args.method}". Use telegram_find to search for the correct method name. Method names are camelCase (e.g. sendMessage, not send_message).` }],
-          isError: true,
-        };
-      }
-
-      return executeMethod(client, methodDef, (args.params || {}) as Record<string, unknown>, config.defaultChatId);
-    }
-  );
 }
 
 // ─── Formats ───────────────────────────────────────────────────────────
@@ -218,296 +109,9 @@ function registerFormatTool(server: McpServer): void {
   }
 }
 
-// ─── TRAIL ─────────────────────────────────────────────────────────────
-
-function registerTrailTools(server: McpServer): Trail {
-  let dataDir: string;
-  try {
-    dataDir = join(dirname(fileURLToPath(import.meta.url)), "..", "data");
-  } catch {
-    // Non-file module URLs (e.g. bundled Workers) have no on-disk data dir.
-    dataDir = "/tmp/telegram-api-mcp-data";
-  }
-  const trail = new Trail(dataDir, "telegram-mcp");
-
-  server.tool(
-    "get_trail",
-    "Query the TRAIL content log. Check what content was posted, failed, or skipped across pipelines.",
-    {
-      content_id: z.string().optional().describe("Filter by content ID (exact or prefix like 'civitai:image:')"),
-      action: z.union([z.string(), z.array(z.string())]).optional().describe("Filter by action (posted, failed, skipped, etc.)"),
-      requester: z.string().optional().describe("Filter by workflow/task ID"),
-      trace_id: z.string().optional().describe("Filter by pipeline trace ID"),
-      since: z.string().optional().describe("ISO 8601 timestamp — only entries after this time"),
-      limit: z.number().int().min(0).max(500).optional().describe("Max entries, newest first (default: 50, 0 = all)"),
-      offset: z.number().int().min(0).optional().describe("Entries to skip for pagination (default: 0)"),
-    },
-    { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async (params) => {
-      const { entries, total } = await trail.query({
-        content_id: params.content_id,
-        action: params.action,
-        requester: params.requester,
-        trace_id: params.trace_id,
-        since: params.since,
-        limit: params.limit ?? 50,
-        offset: params.offset,
-      });
-      if (entries.length === 0) {
-        return { content: [{ type: "text" as const, text: "No trail entries found." }] };
-      }
-      const lines = entries.map((e) => {
-        const d = e.details ?? {};
-        const detailParts = Object.entries(d)
-          .filter(([, v]) => typeof v !== "object")
-          .map(([k, v]) => `${k}=${v}`);
-        const detailStr = detailParts.length ? ` — ${detailParts.join(", ")}` : "";
-        return `[${e.timestamp}] ${e.action} ${e.content_id} (req: ${e.requester})${detailStr}`;
-      });
-      return { content: [{ type: "text" as const, text: `TRAIL Log (${entries.length}/${total}):\n\n${lines.join("\n")}` }] };
-    }
-  );
-
-  server.tool(
-    "mark_trail",
-    "Write an entry to the TRAIL content log. Use to explicitly record content actions.",
-    {
-      content_id: z.string().describe("Content ID in format source:type:id"),
-      action: z.string().describe("Action: fetched, selected, posted, failed, skipped"),
-      requester: z.string().describe("Workflow/task ID"),
-      details: z.record(z.unknown()).optional().describe("Platform-specific data"),
-      trace_id: z.string().optional().describe("Pipeline trace ID"),
-      tags: z.array(z.string()).optional().describe("Labels for filtering"),
-    },
-    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    async (params) => {
-      await trail.append(params.content_id, params.action, params.requester, {
-        details: params.details,
-        trace_id: params.trace_id,
-        tags: params.tags,
-      });
-      return { content: [{ type: "text" as const, text: `Trail entry recorded: ${params.action} ${params.content_id} (req: ${params.requester})` }] };
-    }
-  );
-
-  server.tool(
-    "get_trail_stats",
-    "Get summary statistics from the TRAIL content log.",
-    {
-      requester: z.string().optional().describe("Filter by workflow/task ID"),
-      since: z.string().optional().describe("ISO 8601 timestamp — only count entries after this"),
-    },
-    { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async (params) => {
-      const stats = await trail.stats(params.requester, params.since);
-      const actionLines = Object.entries(stats.by_action)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([act, count]) => `  ${act}: ${count}`)
-        .join("\n");
-      const text = [
-        `TRAIL Statistics:`,
-        `Total entries: ${stats.total_entries}`,
-        `Unique content IDs: ${stats.unique_content_ids}`,
-        `First entry: ${stats.first_entry ?? "N/A"}`,
-        `Last entry: ${stats.last_entry ?? "N/A"}`,
-        `By action:\n${actionLines}`,
-      ].join("\n");
-      return { content: [{ type: "text" as const, text }] };
-    }
-  );
-
-  return trail;
-}
-
-// ─── Download ───────────────────────────────────────────────────────────
-
-const NO_STORAGE_MESSAGE =
-  "No file storage on this deployment: bind an R2 bucket as FILES in wrangler.toml " +
-  "(see README, \"Temporary file storage\"). The file_id is still usable in send_* calls.";
-
-/** Media fields of a Message that carry a downloadable file, in lookup order. */
-const MEDIA_FIELDS = [
-  "document", "video", "animation", "audio", "voice", "video_note", "sticker",
-] as const;
-
-/** Pull the downloadable file out of a Message (largest size for photos). */
-export function extractMedia(
-  message: Record<string, unknown>
-): { kind: string; fileId: string; fileName?: string } | null {
-  const photo = message.photo;
-  if (Array.isArray(photo) && photo.length > 0) {
-    const largest = photo[photo.length - 1] as { file_id: string };
-    return { kind: "photo", fileId: largest.file_id };
-  }
-  for (const kind of MEDIA_FIELDS) {
-    const media = message[kind] as { file_id?: string; file_name?: string } | undefined;
-    if (media?.file_id) return { kind, fileId: media.file_id, fileName: media.file_name };
-  }
-  return null;
-}
-
-function registerDownloadTools(
-  server: McpServer,
-  client: TelegramClient,
-  config: Config,
-  options: ServerOptions
-): void {
-  const defaultDir = process.env.TELEGRAM_DOWNLOAD_DIR || (process.platform === "win32"
-    ? `${process.env.USERPROFILE || "C:\\Users\\user"}\\Downloads\\telegram-mcp`
-    : `${process.env.HOME || "/tmp"}/telegram-mcp-downloads`);
-
-  /** Fetch a file and put it wherever this runtime can keep it. */
-  const download = async (
-    fileId: string,
-    destDir?: string,
-    preferredName?: string
-  ): Promise<Record<string, unknown>> => {
-    if (options.fileStore) {
-      const { fileName, data } = await client.fetchFile(fileId);
-      const stored = await options.fileStore.save(preferredName || fileName, data);
-      return {
-        url: stored.url,
-        expires_at: stored.expiresAt,
-        size: stored.size,
-        content_type: stored.contentType,
-      };
-    }
-    if (options.noLocalFs) throw new Error(NO_STORAGE_MESSAGE);
-    return { path: await client.downloadFile(fileId, destDir || defaultDir) };
-  };
-
-  const where = options.fileStore
-    ? "Stores it in temporary storage and returns a short-lived download URL."
-    : "Saves locally and returns the path.";
-
-  server.tool(
-    "download_file",
-    `Download a file from Telegram by file_id. ${where} Use after receiving a message with a photo, video, document, voice, etc. Max 20MB (Telegram Bot API limit).`,
-    {
-      file_id: z.string().describe("File ID from a message (photo[-1].file_id, document.file_id, video.file_id, etc.)"),
-      dest_dir: z.string().optional().describe(`Directory to save to (default: ${defaultDir}); ignored when files go to temporary storage`),
-    },
-    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    async (params) => {
-      try {
-        const result = await download(params.file_id, params.dest_dir);
-        const text = result.path
-          ? `Downloaded to: ${result.path}`
-          : JSON.stringify(result, null, 2);
-        return { content: [{ type: "text" as const, text }] };
-      } catch (error) {
-        return {
-          content: [{ type: "text" as const, text: `Download failed: ${(error as Error).message}` }],
-          isError: true,
-        };
-      }
-    }
-  );
-
-  const chatId = z.union([z.number().int(), z.string()]);
-
-  server.tool(
-    "get_message_file",
-    "Get the file (photo, document, video, voice, ...) attached to an existing message by chat + message ID. " +
-      "The Bot API cannot read a message by ID, so this forwards it silently to a scratch chat, reads the file_id, " +
-      "deletes the forwarded copy, and downloads the file. For a link like t.me/c/1234567890/150 use " +
-      "from_chat_id -1001234567890 and message_id 150. The bot must be able to read the source chat.",
-    {
-      from_chat_id: chatId.describe("Chat the message lives in (ID or @username)"),
-      message_id: z.number().int().describe("ID of the message that carries the file"),
-      scratch_chat_id: chatId.optional().describe(
-        "Chat the temporary forward goes to — a private chat with the bot is best" +
-          (config.defaultChatId ? ` (default: ${config.defaultChatId})` : " (required: no default chat is configured)")
-      ),
-      download: z.boolean().optional().describe("Also download the file (default true). False returns only the file_id."),
-    },
-    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    async (params) => {
-      const fail = (text: string) => ({ content: [{ type: "text" as const, text }], isError: true });
-
-      const scratch = params.scratch_chat_id ?? config.defaultChatId;
-      if (scratch === undefined) {
-        return fail("scratch_chat_id is required: no TELEGRAM_DEFAULT_CHAT_ID is configured.");
-      }
-
-      try {
-        const forwarded = (await client.call("forwardMessage", {
-          chat_id: scratch,
-          from_chat_id: params.from_chat_id,
-          message_id: params.message_id,
-          disable_notification: true,
-        })) as Record<string, unknown>;
-
-        // Remove the copy before anything else can fail.
-        let cleanup: string | undefined;
-        try {
-          await client.call("deleteMessage", { chat_id: scratch, message_id: forwarded.message_id });
-        } catch (error) {
-          cleanup = `Forwarded copy ${String(forwarded.message_id)} was left in chat ${String(scratch)}: ${(error as Error).message}`;
-        }
-
-        const media = extractMedia(forwarded);
-        if (!media) {
-          return fail(`Message ${params.message_id} has no downloadable file.${cleanup ? ` ${cleanup}` : ""}`);
-        }
-
-        const result: Record<string, unknown> = { kind: media.kind, file_id: media.fileId };
-        if (media.fileName) result.file_name = media.fileName;
-        if (cleanup) result.warning = cleanup;
-
-        if (params.download !== false) {
-          try {
-            Object.assign(result, await download(media.fileId, undefined, media.fileName));
-          } catch (error) {
-            // The file_id is still worth returning.
-            result.download_error = (error as Error).message;
-          }
-        }
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-      } catch (error) {
-        return fail(`get_message_file failed: ${(error as Error).message}`);
-      }
-    }
-  );
-}
-
 // ─── Execution ──────────────────────────────────────────────────────────
 
-/** For meta-mode: validate then call. */
-async function executeMethod(
-  client: TelegramClient,
-  method: MethodDef,
-  params: Record<string, unknown>,
-  defaultChatId?: string
-): Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
-  const schema = getSchema(method, defaultChatId);
-  const parseResult = schema.safeParse(params);
-
-  if (!parseResult.success) {
-    const errors = parseResult.error.issues
-      .map((i) => `  ${i.path.join(".")}: ${i.message}`)
-      .join("\n");
-    const required = method.params.filter((p) => p.required).map((p) => p.name);
-    return {
-      content: [{ type: "text", text: `Validation error for ${method.apiMethod}:\n${errors}\n\nRequired params: ${required.join(", ") || "none"}. Use telegram_find(query: "${method.apiMethod}") to see full parameter list.` }],
-      isError: true,
-    };
-  }
-
-  return callTelegram(client, method, parseResult.data as Record<string, unknown>);
-}
-
-/** Methods that produce posts/messages worth logging. */
-const LOGGED_METHODS = new Set([
-  "sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendAudio",
-  "sendAnimation", "sendVoice", "sendVideoNote", "sendMediaGroup",
-  "sendPaidMedia", "sendSticker", "sendLocation", "sendVenue", "sendContact",
-  "sendPoll", "sendDice", "sendChecklist", "sendGame", "sendInvoice",
-  "sendGift", "sendMessageDraft", "forwardMessage", "forwardMessages",
-  "copyMessage", "copyMessages", "postStory",
-]);
-
-/** For standard mode: already validated by SDK, just call. */
+/** Params arrive already validated by the SDK. */
 async function callTelegram(
   client: TelegramClient,
   method: MethodDef,
@@ -515,28 +119,6 @@ async function callTelegram(
 ): Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
   try {
     const result = await client.call(method.apiMethod, params);
-
-    // Auto-log send/forward/copy/post calls
-    if (LOGGED_METHODS.has(method.apiMethod) && result != null) {
-      const r = (Array.isArray(result) ? result[0] : result) as Record<string, unknown> | undefined;
-      // TRAIL auto-logging
-      const _trail = params._trail as Record<string, unknown> | undefined;
-      const trailCid = (_trail?.content_id ?? params.content_id) as string | undefined;
-      const trailReq = (_trail?.requester ?? params.requester) as string | undefined;
-      if (trailCid && trailReq && trailInstance) {
-        trailInstance.append(trailCid, "posted", trailReq, {
-          details: {
-            platform: "telegram",
-            platform_id: String(r?.message_id ?? ""),
-            chat_id: String(params.chat_id ?? ""),
-          },
-          trace_id: (_trail?.trace_id ?? params.trace_id) as string | undefined,
-        }).catch((err) => {
-          log("warn", `trail write failed: ${(err as Error).message}`);
-        });
-      }
-    }
-
     const text = formatResult(method.apiMethod, result);
     return { content: [{ type: "text", text }] };
   } catch (error) {
@@ -571,9 +153,4 @@ function formatResult(method: string, result: unknown): string {
   }
 
   return text;
-}
-
-function log(level: "info" | "warn" | "error", msg: string): void {
-  const ts = new Date().toISOString();
-  console.error(`[${ts}] [${level.toUpperCase()}] ${msg}`);
 }

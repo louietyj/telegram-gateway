@@ -1,16 +1,11 @@
 {
-  "name": "telegram-mcp-worker",
-  "version": "0.2.0",
-  "description": "Ultimate Telegram Bot API v10.2 MCP Server — 185 methods incl. rich messages, meta-mode, rate limiting, circuit breaker",
+  "name": "telegram-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that owns a Telegram bot: webhook ingest to D1, Bot API and history over MCP",
   "type": "module",
-  "main": "dist/index.js",
-  "bin": {
-    "telegram-api-mcp": "dist/index.js"
-  },
   "scripts": {
     "build": "tsc",
-    "dev": "tsx src/index.ts",
-    "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -18,7 +13,6 @@
     "audit": "npm run build && node scripts/audit-registry.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
-    "prepublishOnly": "npm run build",
     "worker:dev": "wrangler dev",
     "worker:deploy": "wrangler deploy"
   },
@@ -31,18 +25,10 @@
     "claude",
     "ai-agent"
   ],
-  "author": "timoncool",
   "license": "MIT",
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE",
-    "server.json",
-    "smithery.yaml"
-  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/timoncool/telegram-api-mcp.git"
+    "url": "https://github.com/louietyj/telegram-gateway.git"
   },
   "engines": {
     "node": ">=18.0.0"

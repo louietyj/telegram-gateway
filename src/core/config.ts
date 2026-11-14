@@ -22,8 +22,6 @@ export interface Config {
   allowedUploadDirs: string[];
   /** Max file size in bytes (default: 50MB) */
   maxFileSize: number;
-  /** Run in meta-mode with 2 tools instead of all (default: false) */
-  metaMode: boolean;
 }
 
 export function loadConfig(source: Record<string, string | undefined> = process.env): Config {
@@ -49,6 +47,5 @@ export function loadConfig(source: Record<string, string | undefined> = process.
     circuitBreakerCooldown: parseInt(source.TELEGRAM_CB_COOLDOWN || "30000", 10),
     allowedUploadDirs: uploadDirs ? uploadDirs.split(",").map((d) => d.trim()) : [],
     maxFileSize: parseInt(source.TELEGRAM_MAX_FILE_SIZE || String(50 * 1024 * 1024), 10),
-    metaMode: source.TELEGRAM_META_MODE === "true",
   };
 }
