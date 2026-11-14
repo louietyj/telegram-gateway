@@ -9,6 +9,7 @@ import { FORMATS, findFormat, formatIndex } from "./formats.js";
 import { Store } from "../store/store.js";
 import { Reader } from "../store/read.js";
 import { registerHistoryTools } from "./history-tools.js";
+import { registerFileTool } from "./file-tool.js";
 
 /** Pre-built Zod schemas for all methods (built once, reused on every call). */
 const schemaCache = new Map<string, ReturnType<typeof buildZodSchema>>();
@@ -52,6 +53,7 @@ export function buildServer(
   registerAllTools(server, ctx);
   registerFormatTool(server);
   registerHistoryTools(server, reader);
+  registerFileTool(server, client);
 
   return { server, client };
 }

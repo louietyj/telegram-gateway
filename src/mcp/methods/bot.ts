@@ -244,7 +244,7 @@ export const botMethods: MethodDef[] = [
     apiMethod: "getFile",
     annotations: ANNOTATIONS.readOnly,
     toolName: "get_file",
-    description: "Get file info for downloading. Returns file_path — use https://api.telegram.org/file/bot<token>/<file_path> to download.",
+    description: "Get file metadata (size, file_path). To get the bytes, use download_file.",
     category: "bot",
     needsChatId: false,
     canUploadFiles: false,
