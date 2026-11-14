@@ -4,9 +4,10 @@
  *   POST /webhook  Telegram updates; requires the setWebhook secret_token header.
  *   POST /mcp      MCP over stateless Streamable HTTP; requires MCP_AUTH_TOKEN. An optional
  *                  X-Client-Name header is recorded on the messages that client sends.
+ *   /admin/webhook GET/POST/DELETE the bot's webhook (src/admin.ts); requires ADMIN_TOKEN.
  *
  * Bindings: DB (D1, schema in migrations/).
- * Secrets: TELEGRAM_BOT_TOKEN, MCP_AUTH_TOKEN, WEBHOOK_SECRET. All are required:
+ * Secrets: TELEGRAM_BOT_TOKEN, MCP_AUTH_TOKEN, WEBHOOK_SECRET, ADMIN_TOKEN. All are required:
  * a missing one fails closed. Optional vars: TELEGRAM_DEFAULT_CHAT_ID,
  * TELEGRAM_DEFAULT_THREAD_ID and the tuning knobs in src/core/config.ts.
  */
@@ -17,12 +18,15 @@ import { buildServer } from "./mcp/server.js";
 import { D1Like } from "./store/db.js";
 import { Store } from "./store/store.js";
 import { Reader } from "./store/read.js";
+import { TelegramClient } from "./telegram/telegram-client.js";
+import { handleAdminWebhook } from "./admin.js";
 
 export interface Env {
   DB: D1Like;
   TELEGRAM_BOT_TOKEN?: string;
   MCP_AUTH_TOKEN?: string;
   WEBHOOK_SECRET?: string;
+  ADMIN_TOKEN?: string;
   TELEGRAM_DEFAULT_CHAT_ID?: string;
   TELEGRAM_DEFAULT_THREAD_ID?: string;
 }
@@ -88,6 +92,21 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
   }
 }
 
+async function handleAdmin(request: Request, env: Env): Promise<Response> {
+  if (!env.ADMIN_TOKEN) return misconfigured("ADMIN_TOKEN");
+  if (!env.WEBHOOK_SECRET) return misconfigured("WEBHOOK_SECRET");
+  if (!(await hasToken(request, env.ADMIN_TOKEN))) return json({ error: "unauthorized" }, 401);
+
+  const client = new TelegramClient(loadConfig(env as unknown as Record<string, string | undefined>));
+  try {
+    return json({ ok: true, result: await handleAdminWebhook(request, client, env.WEBHOOK_SECRET) });
+  } catch (error) {
+    return json({ ok: false, error: (error as Error).message }, 502);
+  } finally {
+    client.destroy();
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     switch (new URL(request.url).pathname) {
@@ -98,6 +117,8 @@ export default {
         return handleWebhook(request, env);
       case "/mcp":
         return handleMcp(request, env);
+      case "/admin/webhook":
+        return handleAdmin(request, env);
       default:
         return json({ error: "not_found" }, 404);
     }

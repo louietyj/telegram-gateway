@@ -17,7 +17,7 @@ export default [
       ...tseslint.configs.recommended.rules,
       "@typescript-eslint/no-explicit-any": "off", // z.any() used for complex Telegram types
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
-      "no-console": "error", // All output must go to stderr
+      "no-console": ["error", { allow: ["error", "warn"] }], // the Worker's log sink
     },
   },
 ];
