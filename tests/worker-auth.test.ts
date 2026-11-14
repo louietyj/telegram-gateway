@@ -1,15 +1,11 @@
 import { describe, it, expect } from "vitest";
 import worker, { type Env } from "../src/worker.js";
+import { exposedMethods, BLOCKED_METHODS } from "../src/mcp/methods/index.js";
 
-// Auth gate seam: POST /mcp. The test env deliberately omits
-// TELEGRAM_BOT_TOKEN, so a request that PASSES the auth gate fails later
-// with 500 server_misconfigured, while a rejected one stops at 401.
-const env: Env = { MCP_AUTH_TOKEN: "test-secret" };
+// No TELEGRAM_BOT_TOKEN: a request that passes the auth gate fails later with 500.
+const env: Env = { MCP_AUTH_TOKEN: "test-secret", WEBHOOK_SECRET: "hook-secret" };
 
-function mcpRequest(
-  headers: Record<string, string> = {},
-  query = ""
-): Request {
+function mcpRequest(headers: Record<string, string> = {}, query = ""): Request {
   return new Request(`https://worker.test/mcp${query}`, {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
@@ -17,64 +13,67 @@ function mcpRequest(
   });
 }
 
+function webhookRequest(headers: Record<string, string> = {}): Request {
+  return new Request("https://worker.test/webhook", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify({ update_id: 1 }),
+  });
+}
+
 describe("Worker /mcp auth", () => {
   it("rejects a request with no credentials", async () => {
-    const res = await worker.fetch(mcpRequest(), env);
-    expect(res.status).toBe(401);
+    expect((await worker.fetch(mcpRequest(), env)).status).toBe(401);
   });
 
   it("accepts Authorization: Bearer <token>", async () => {
-    const res = await worker.fetch(
-      mcpRequest({ authorization: "Bearer test-secret" }),
-      env
-    );
+    const res = await worker.fetch(mcpRequest({ authorization: "Bearer test-secret" }), env);
     expect(res.status).not.toBe(401);
-  });
-
-  it("rejects a wrong Bearer token", async () => {
-    const res = await worker.fetch(
-      mcpRequest({ authorization: "Bearer wrong" }),
-      env
-    );
-    expect(res.status).toBe(401);
   });
 
   it("accepts x-api-key: <token>", async () => {
-    const res = await worker.fetch(
-      mcpRequest({ "x-api-key": "test-secret" }),
-      env
-    );
+    const res = await worker.fetch(mcpRequest({ "x-api-key": "test-secret" }), env);
     expect(res.status).not.toBe(401);
   });
 
-  it("rejects a wrong x-api-key", async () => {
-    const res = await worker.fetch(
-      mcpRequest({ "x-api-key": "wrong" }),
-      env
-    );
-    expect(res.status).toBe(401);
+  it("rejects wrong tokens", async () => {
+    for (const headers of [{ authorization: "Bearer wrong" }, { "x-api-key": "wrong" }, { "x-api-key": "test-secre" }]) {
+      expect((await worker.fetch(mcpRequest(headers), env)).status).toBe(401);
+    }
   });
 
-  it("accepts api-key: <token>", async () => {
-    const res = await worker.fetch(
-      mcpRequest({ "api-key": "test-secret" }),
-      env
-    );
-    expect(res.status).not.toBe(401);
+  it("does not accept the token in the URL", async () => {
+    expect((await worker.fetch(mcpRequest({}, "?token=test-secret"), env)).status).toBe(401);
   });
 
-  it("rejects a wrong api-key", async () => {
-    const res = await worker.fetch(mcpRequest({ "api-key": "wrong" }), env);
-    expect(res.status).toBe(401);
+  it("fails closed when MCP_AUTH_TOKEN is unset", async () => {
+    const res = await worker.fetch(mcpRequest({ authorization: "Bearer " }), {});
+    expect(res.status).toBe(500);
+  });
+});
+
+describe("Worker /webhook auth", () => {
+  it("rejects a missing or wrong secret", async () => {
+    expect((await worker.fetch(webhookRequest(), env)).status).toBe(401);
+    const wrong = webhookRequest({ "x-telegram-bot-api-secret-token": "nope" });
+    expect((await worker.fetch(wrong, env)).status).toBe(401);
   });
 
-  it("accepts ?token=<token> in the URL", async () => {
-    const res = await worker.fetch(mcpRequest({}, "?token=test-secret"), env);
-    expect(res.status).not.toBe(401);
+  it("accepts the right secret", async () => {
+    const ok = webhookRequest({ "x-telegram-bot-api-secret-token": "hook-secret" });
+    expect((await worker.fetch(ok, env)).status).toBe(200);
   });
 
-  it("rejects a wrong ?token=", async () => {
-    const res = await worker.fetch(mcpRequest({}, "?token=wrong"), env);
-    expect(res.status).toBe(401);
+  it("fails closed when WEBHOOK_SECRET is unset", async () => {
+    const res = await worker.fetch(webhookRequest({ "x-telegram-bot-api-secret-token": "" }), {});
+    expect(res.status).toBe(500);
+  });
+});
+
+describe("blocked methods", () => {
+  it("are not exposed as tools", () => {
+    const exposed = new Set(exposedMethods.map((m) => m.apiMethod));
+    for (const name of BLOCKED_METHODS) expect(exposed.has(name)).toBe(false);
+    expect(exposed.has("sendMessage")).toBe(true);
   });
 });

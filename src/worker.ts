@@ -1,30 +1,16 @@
 /**
  * Cloudflare Worker entry point.
  *
- * Exposes the same MCP server as the stdio build (src/index.ts) over
- * stateless Streamable HTTP at POST /mcp, using the SDK's web-standard
- * transport. A fresh server is built per request; no session state is kept.
+ *   POST /webhook  Telegram updates; requires the setWebhook secret_token header.
+ *   POST /mcp      MCP over stateless Streamable HTTP; requires MCP_AUTH_TOKEN.
  *
- * Secrets (wrangler secret put / .dev.vars):
- *   TELEGRAM_BOT_TOKEN  — required, from @BotFather
- *   MCP_AUTH_TOKEN      — optional; when set, clients must send the token
- *                         in one of: `Authorization: Bearer <MCP_AUTH_TOKEN>`,
- *                         `x-api-key: <MCP_AUTH_TOKEN>`,
- *                         `api-key: <MCP_AUTH_TOKEN>` or the URL query
- *                         `?token=<MCP_AUTH_TOKEN>` (same token, any form
- *                         the client supports).
- *   WEBHOOK_SECRET      — optional; when set, POST /webhook only accepts
- *                         updates whose `X-Telegram-Bot-Api-Secret-Token`
- *                         header matches (register the same value as the
- *                         setWebhook secret_token).
- *
- * Webhook: point the bot's webhook at POST /webhook on this worker. Updates
- * are written to the worker log (Workers observability / wrangler tail).
- * Optional vars: TELEGRAM_DEFAULT_CHAT_ID, TELEGRAM_DEFAULT_THREAD_ID, and the
- * TELEGRAM_* tuning knobs documented in src/core/config.ts.
+ * Secrets: TELEGRAM_BOT_TOKEN, MCP_AUTH_TOKEN, WEBHOOK_SECRET. All are required:
+ * a missing one fails closed. Optional vars: TELEGRAM_DEFAULT_CHAT_ID,
+ * TELEGRAM_DEFAULT_THREAD_ID and the tuning knobs in src/core/config.ts.
  */
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { loadConfig } from "./core/config.js";
+import { hasToken, safeEqual } from "./core/auth.js";
 import { buildServer } from "./mcp/server.js";
 
 export interface Env {
@@ -34,22 +20,6 @@ export interface Env {
   [key: string]: string | undefined;
 }
 
-/**
- * A request is authorized when it carries the MCP_AUTH_TOKEN in any of the
- * credential forms MCP clients commonly support: Bearer authorization, the
- * `x-api-key` or `api-key` headers, or a `?token=` query parameter (for
- * URL-only clients; headers are preferred because URLs get logged). Header
- * names are case-insensitive (Headers normalizes them); the token value
- * must match exactly.
- */
-function isAuthorized(request: Request, token: string): boolean {
-  if (request.headers.get("authorization") === `Bearer ${token}`) return true;
-  if (request.headers.get("x-api-key") === token) return true;
-  if (request.headers.get("api-key") === token) return true;
-  if (new URL(request.url).searchParams.get("token") === token) return true;
-  return false;
-}
-
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -57,73 +27,65 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+const misconfigured = (what: string) => json({ error: "server_misconfigured", message: `${what} is not set` }, 500);
+
+async function handleWebhook(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+  if (!env.WEBHOOK_SECRET) return misconfigured("WEBHOOK_SECRET");
+  const secret = request.headers.get("x-telegram-bot-api-secret-token");
+  if (secret === null || !(await safeEqual(secret, env.WEBHOOK_SECRET))) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  let update: unknown;
+  try {
+    update = await request.json();
+  } catch {
+    return json({ error: "invalid_json" }, 400);
+  }
+  // eslint-disable-next-line no-console
+  console.log("telegram_update", JSON.stringify(update));
+  return json({ ok: true });
+}
+
+async function handleMcp(request: Request, env: Env): Promise<Response> {
+  if (!env.MCP_AUTH_TOKEN) return misconfigured("MCP_AUTH_TOKEN");
+  if (!(await hasToken(request, env.MCP_AUTH_TOKEN))) return json({ error: "unauthorized" }, 401);
+
+  let config;
+  try {
+    config = loadConfig(env);
+  } catch (error) {
+    return json({ error: "server_misconfigured", message: (error as Error).message }, 500);
+  }
+
+  const { server, client } = buildServer(config);
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: undefined, // stateless
+    enableJsonResponse: true,
+  });
+
+  try {
+    await server.connect(transport);
+    return await transport.handleRequest(request);
+  } finally {
+    client.destroy();
+    await server.close().catch(() => undefined);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/" || url.pathname === "/health") {
-      return new Response(
-        "telegram-api-mcp worker is running. MCP endpoint: POST /mcp\n",
-        { headers: { "content-type": "text/plain; charset=utf-8" } }
-      );
-    }
-
-    if (url.pathname === "/webhook") {
-      if (request.method === "GET") {
-        return new Response(
-          "telegram webhook endpoint is active. Telegram delivers updates via POST.\n",
-          { headers: { "content-type": "text/plain; charset=utf-8" } }
-        );
-      }
-      if (request.method !== "POST") {
-        return json({ error: "method_not_allowed" }, 405);
-      }
-      if (env.WEBHOOK_SECRET) {
-        if (request.headers.get("x-telegram-bot-api-secret-token") !== env.WEBHOOK_SECRET) {
-          return json({ error: "unauthorized" }, 401);
-        }
-      }
-      let update: unknown;
-      try {
-        update = await request.json();
-      } catch {
-        return json({ error: "invalid_json" }, 400);
-      }
-      // v1 receiver: acknowledge fast and keep the update in the worker log
-      // (visible in the Cloudflare dashboard observability / wrangler tail).
-      console.log("telegram_update", JSON.stringify(update));
-      return json({ ok: true });
-    }
-
-    if (url.pathname !== "/mcp") {
-      return json({ error: "not_found" }, 404);
-    }
-
-    if (env.MCP_AUTH_TOKEN) {
-      if (!isAuthorized(request, env.MCP_AUTH_TOKEN)) {
-        return json({ error: "unauthorized" }, 401);
-      }
-    }
-
-    let config;
-    try {
-      config = loadConfig(env);
-    } catch (error) {
-      return json({ error: "server_misconfigured", message: (error as Error).message }, 500);
-    }
-
-    const { server, client } = buildServer(config);
-    const transport = new WebStandardStreamableHTTPServerTransport({
-      sessionIdGenerator: undefined, // stateless
-      enableJsonResponse: true,
-    });
-
-    try {
-      await server.connect(transport);
-      return await transport.handleRequest(request);
-    } finally {
-      client.destroy();
-      await server.close().catch(() => undefined);
+    switch (new URL(request.url).pathname) {
+      case "/":
+      case "/health":
+        return new Response("ok\n", { headers: { "content-type": "text/plain; charset=utf-8" } });
+      case "/webhook":
+        return handleWebhook(request, env);
+      case "/mcp":
+        return handleMcp(request, env);
+      default:
+        return json({ error: "not_found" }, 404);
     }
   },
 };

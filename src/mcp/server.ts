@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Config } from "../core/config.js";
 import { TelegramClient, TelegramApiError } from "../telegram/telegram-client.js";
 import { MethodDef, buildZodSchema } from "./method-registry.js";
-import { allMethods } from "./methods/index.js";
+import { exposedMethods } from "./methods/index.js";
 import { CircuitOpenError } from "../core/circuit-breaker.js";
 import { FORMATS, findFormat, formatIndex } from "./formats.js";
 
@@ -39,7 +39,7 @@ export function buildServer(config: Config): { server: McpServer; client: Telegr
 }
 
 function registerAllTools(server: McpServer, client: TelegramClient, config: Config): void {
-  for (const method of allMethods) {
+  for (const method of exposedMethods) {
     const zodSchema = getSchema(method, config.defaultChatId);
 
     const annotations = method.annotations || { destructiveHint: false };

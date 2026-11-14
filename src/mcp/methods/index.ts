@@ -41,6 +41,17 @@ export const allMethods: MethodDef[] = [
   ...otherMethods,
 ];
 
+/**
+ * Never exposed as tools: they break the Worker's ownership of the update flow
+ * (getUpdates conflicts with the webhook; the webhook is set by the admin route)
+ * or do something to the bot that Telegram can't refuse.
+ */
+export const BLOCKED_METHODS = new Set([
+  "getUpdates", "setWebhook", "deleteWebhook", "logOut", "close", "leaveChat",
+]);
+
+export const exposedMethods = allMethods.filter((m) => !BLOCKED_METHODS.has(m.apiMethod));
+
 /** Lookup method by tool name */
 export function findMethodByToolName(toolName: string): MethodDef | undefined {
   return allMethods.find((m) => m.toolName === toolName);
