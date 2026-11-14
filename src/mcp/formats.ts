@@ -47,7 +47,7 @@ Optional siblings: \`is_rtl\` (bool), \`skip_entity_detection\` (bool — turns 
 
 ## Media — the rule people get wrong
 Media lives in its **own block**. Inline, the source must be an **HTTP(S) URL** — a bare \`file_id\`
-or a local path written straight into the markdown will NOT work.
+or a data: URI written straight into the markdown will NOT work.
 
 \`\`\`
 ![](https://host/photo.jpg "Photo caption")
@@ -56,10 +56,10 @@ or a local path written straight into the markdown will NOT work.
 ![](https://host/animation.gif "Animation caption")
 \`\`\`
 
-**Local files and file_ids go through the \`media\` array**, referenced from the text by id.
+**data: URIs and file_ids go through the \`media\` array**, referenced from the text by id.
 The link scheme must match the kind: \`tg://photo?id=\`, \`tg://video?id=\`, \`tg://audio?id=\` —
 pointing a \`tg://photo\` link at a video is rejected with RICH_MESSAGE_PHOTO_INVALID.
-Ids are 1–64 chars of \`A-Z a-z 0-9 _ -\`. Absolute local paths are uploaded as multipart
+Ids are 1–64 chars of \`A-Z a-z 0-9 _ -\`. data: URIs are uploaded as multipart
 (\`attach://\`) by this server; the 50 MB per-file ceiling applies.
 
 \`\`\`json
@@ -160,7 +160,7 @@ const MEDIA: FormatDoc = {
   "chat_id": "@mychannel",
   "media": [
     { "type": "photo", "media": "https://host/a.jpg", "caption": "Only the first caption shows", "parse_mode": "HTML" },
-    { "type": "photo", "media": "C:\\\\path\\\\to\\\\local.jpg" },
+    { "type": "photo", "media": "data:image/jpeg;name=b.jpg;base64,/9j/4AAQ..." },
     { "type": "video", "media": "AgACAgIAAx...file_id", "cover": "https://host/cover.jpg" }
   ]
 }
@@ -174,7 +174,8 @@ Each \`media\` (and \`thumbnail\`, \`cover\`) accepts three sources, all handled
 - **HTTP(S) URL** — this server downloads it and uploads the bytes, so the 5 MB photo / 20 MB
   other-file ceiling on Telegram's own URL fetching does not apply. Failures are reported with the
   HTTP status or the real file size, never silently swapped for something else.
-- **Absolute local path** — uploaded as multipart and referenced as \`attach://\`.
+- **data: URI** — \`data:<mime>;name=<filename>;base64,<bytes>\`, for files only the caller has.
+  Uploaded as multipart; \`name\` is optional but sets the filename Telegram sees.
 
 Upload ceiling is 10 MB for photos and 50 MB for other files. Captions follow the \`caption\` rules.`,
 };

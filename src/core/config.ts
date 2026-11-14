@@ -18,8 +18,6 @@ export interface Config {
   circuitBreakerThreshold: number;
   /** Circuit breaker: cooldown in ms before half-open (default: 30000) */
   circuitBreakerCooldown: number;
-  /** Allowed directories for file uploads (comma-separated, empty = no restriction) */
-  allowedUploadDirs: string[];
   /** Max file size in bytes (default: 50MB) */
   maxFileSize: number;
 }
@@ -34,8 +32,6 @@ export function loadConfig(source: Record<string, string | undefined> = process.
 
   const threadId = source.TELEGRAM_DEFAULT_THREAD_ID;
 
-  const uploadDirs = source.TELEGRAM_ALLOWED_UPLOAD_DIRS;
-
   return {
     botToken: token,
     defaultChatId: source.TELEGRAM_DEFAULT_CHAT_ID || undefined,
@@ -45,7 +41,6 @@ export function loadConfig(source: Record<string, string | undefined> = process.
     maxRetries: parseInt(source.TELEGRAM_MAX_RETRIES || "3", 10),
     circuitBreakerThreshold: parseInt(source.TELEGRAM_CB_THRESHOLD || "5", 10),
     circuitBreakerCooldown: parseInt(source.TELEGRAM_CB_COOLDOWN || "30000", 10),
-    allowedUploadDirs: uploadDirs ? uploadDirs.split(",").map((d) => d.trim()) : [],
     maxFileSize: parseInt(source.TELEGRAM_MAX_FILE_SIZE || String(50 * 1024 * 1024), 10),
   };
 }

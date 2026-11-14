@@ -1,6 +1,3 @@
-import { readFile, writeFile, stat, mkdir, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, dirname, extname, isAbsolute, join, resolve, normalize, sep } from "node:path";
 import { Config } from "../core/config.js";
 import { RateLimiter } from "../core/rate-limiter.js";
 import { CircuitBreaker, CircuitOpenError } from "../core/circuit-breaker.js";
@@ -8,14 +5,20 @@ import { CircuitBreaker, CircuitOpenError } from "../core/circuit-breaker.js";
 /** Default fetch timeout: 60 seconds */
 const FETCH_TIMEOUT_MS = 60_000;
 
-/** Parameters that carry a file: a file_id, an HTTP URL, or a local path. */
+/** Parameters that carry a file: a file_id, an http(s) URL, or a data: URI. */
 const FILE_FIELDS = [
   "photo", "audio", "document", "video", "animation", "voice",
   "video_note", "sticker", "thumbnail", "certificate", "cover", "live_photo",
 ] as const;
 
+const INPUT_MEDIA_FILE_FIELDS = ["media", "thumbnail", "cover"] as const;
+
 function isHttpUrl(value: unknown): value is string {
   return typeof value === "string" && /^https?:\/\//i.test(value);
+}
+
+function isDataUri(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith("data:");
 }
 
 /**
@@ -56,20 +59,6 @@ function inputMediaObjects(params: Record<string, unknown>): Record<string, unkn
   return objects;
 }
 
-/** Guess a sane filename for a downloaded URL — Telegram infers type from it. */
-function filenameForUrl(url: string, contentType: string | null): string {
-  let name = "";
-  try {
-    name = basename(new URL(url).pathname);
-  } catch {
-    name = "";
-  }
-  if (extname(name)) return name;
-
-  const ext = contentType && MIME_EXTENSIONS[contentType.split(";")[0].trim().toLowerCase()];
-  return `${name || "file"}${ext ?? ".bin"}`;
-}
-
 const MIME_EXTENSIONS: Record<string, string> = {
   "image/jpeg": ".jpg",
   "image/png": ".png",
@@ -84,6 +73,64 @@ const MIME_EXTENSIONS: Record<string, string> = {
   "application/pdf": ".pdf",
   "application/zip": ".zip",
 };
+
+/** A sane filename for an upload — Telegram infers the file type from it. */
+function filenameFor(name: string, contentType: string | null): string {
+  if (/\.[A-Za-z0-9]+$/.test(name)) return name;
+  const ext = contentType && MIME_EXTENSIONS[contentType.split(";")[0].trim().toLowerCase()];
+  return `${name || "file"}${ext ?? ".bin"}`;
+}
+
+function urlBasename(url: string): string {
+  try {
+    return new URL(url).pathname.split("/").pop() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Decode `data:[<mime>][;name=<filename>][;base64],<data>`. The `name` parameter is our
+ * extension (data URIs carry no filename) so callers can control what Telegram sees.
+ */
+export function parseDataUri(uri: string): { bytes: Uint8Array; contentType: string | null; name: string } {
+  const comma = uri.indexOf(",");
+  if (comma < 0) throw new TelegramApiError("Malformed data: URI (no comma)", 400);
+  const meta = uri.slice("data:".length, comma).split(";");
+  const data = uri.slice(comma + 1);
+
+  const contentType = meta[0] || null;
+  const base64 = meta.includes("base64");
+  const nameParam = meta.find((p) => p.startsWith("name="));
+  const name = nameParam ? decodeURIComponent(nameParam.slice("name=".length)) : "";
+
+  let bytes: Uint8Array;
+  if (base64) {
+    let binary: string;
+    try {
+      binary = atob(data.replace(/\s+/g, ""));
+    } catch {
+      throw new TelegramApiError("Malformed data: URI (invalid base64)", 400);
+    }
+    bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  } else {
+    bytes = new TextEncoder().encode(decodeURIComponent(data));
+  }
+  return { bytes, contentType, name };
+}
+
+interface Upload {
+  blob: Blob;
+  name: string;
+}
+
+/** A file field that must be uploaded as multipart, and how to point the request at it. */
+interface UploadTarget {
+  value: string;
+  /** Top-level fields are multipart parts under their own name; InputMedia uses attach://. */
+  topLevelField?: string;
+  setAttach?: (ref: string) => void;
+}
 
 interface TelegramResponse {
   ok: boolean;
@@ -112,28 +159,17 @@ export class TelegramClient {
   private circuitBreaker: CircuitBreaker;
   private config: Config;
   private cleanupInterval: ReturnType<typeof setInterval>;
-  /** Where URLs Telegram could not fetch are mirrored before being uploaded. */
-  private mirrorDir: string;
 
   constructor(config: Config) {
     this.config = config;
     this.token = config.botToken;
-    this.mirrorDir = join(tmpdir(), "telegram-api-mcp");
     this.baseUrl = `https://api.telegram.org/bot${this.token}`;
     this.rateLimiter = new RateLimiter(config.globalRateLimit, config.perChatRateLimit);
     this.circuitBreaker = new CircuitBreaker(
       config.circuitBreakerThreshold,
       config.circuitBreakerCooldown
     );
-
     this.cleanupInterval = setInterval(() => this.rateLimiter.cleanup(), 60_000);
-    // Don't prevent Node.js from exiting (no-op where timers are plain numbers, e.g. Workers)
-    (this.cleanupInterval as unknown as { unref?: () => void }).unref?.();
-
-    // Warn if no upload directory restrictions
-    if (config.allowedUploadDirs.length === 0) {
-      log("warn", "TELEGRAM_ALLOWED_UPLOAD_DIRS not set — file uploads unrestricted. Set it to restrict paths.");
-    }
   }
 
   destroy(): void {
@@ -163,88 +199,97 @@ export class TelegramClient {
     this.circuitBreaker.check();
     await this.rateLimiter.acquire(chatId);
 
-    // Media given as an http(s) URL is always fetched here and uploaded as multipart.
-    // Letting Telegram fetch the URL itself caps it at 5 MB for photos and 20 MB for
-    // everything else and requires a MIME type it agrees with (sendDocument by URL only
-    // accepts PDF and ZIP), so videos and large images failed. Uploading the bytes lifts
-    // that to 10 MB / 50 MB and behaves the same for every link — one path, no retry
-    // dance, and a precise error when a link genuinely cannot be used.
-    if (this.collectRemoteUrls(resolvedParams).length > 0) {
-      const mirrored = await this.mirrorRemoteFiles(resolvedParams);
-      try {
-        return await this.callWithRetry(method, mirrored.params, true);
-      } finally {
-        await Promise.all(mirrored.tempFiles.map((f) => unlink(f).catch(() => undefined)));
-      }
+    // URLs are fetched here and uploaded as bytes rather than handed to Telegram: its own
+    // fetching caps at 5 MB for photos / 20 MB otherwise and rejects many MIME types
+    // (sendDocument by URL only takes PDF and ZIP). Uploads lift that to 10 MB / 50 MB.
+    const formParams = structuredClone(resolvedParams);
+    const targets = this.collectUploadTargets(formParams);
+    if (targets.length === 0) {
+      return this.callWithRetry(method, () => this.postJson(method, resolvedParams));
     }
-
-    return this.callWithRetry(method, resolvedParams, this.hasFileParams(resolvedParams));
+    const form = await this.buildForm(formParams, targets);
+    return this.callWithRetry(method, () => this.postForm(method, form));
   }
 
-  /** Every http(s) URL sitting in a file field, including inside InputMedia. */
-  private collectRemoteUrls(params: Record<string, unknown>): { setter: (v: string) => void; url: string }[] {
-    const found: { setter: (v: string) => void; url: string }[] = [];
+  /** Every URL / data: URI in a file field. buildForm rewrites `params` in place. */
+  private collectUploadTargets(params: Record<string, unknown>): UploadTarget[] {
+    const targets: UploadTarget[] = [];
+    const needsUpload = (v: unknown): v is string => isHttpUrl(v) || isDataUri(v);
 
     for (const field of FILE_FIELDS) {
       const value = params[field];
-      if (isHttpUrl(value)) {
-        found.push({ url: value, setter: (v) => { params[field] = v; } });
-      }
+      if (needsUpload(value)) targets.push({ value, topLevelField: field });
     }
-
     for (const item of inputMediaObjects(params)) {
-      for (const field of ["media", "thumbnail", "cover"]) {
+      for (const field of INPUT_MEDIA_FILE_FIELDS) {
         const value = item[field];
-        if (isHttpUrl(value)) {
-          found.push({ url: value, setter: (v) => { item[field] = v; } });
-        }
+        if (needsUpload(value)) targets.push({ value, setAttach: (ref) => { item[field] = ref; } });
       }
     }
-
-    return found;
+    return targets;
   }
 
-  /** Download every remote file field to a temp file and swap the URLs for local paths. */
-  private async mirrorRemoteFiles(
-    params: Record<string, unknown>
-  ): Promise<{ params: Record<string, unknown>; tempFiles: string[] }> {
-    const copy = structuredClone(params) as Record<string, unknown>;
-    const targets = this.collectRemoteUrls(copy);
-    const dir = this.mirrorDir;
-    await mkdir(dir, { recursive: true });
+  private async buildForm(params: Record<string, unknown>, targets: UploadTarget[]): Promise<FormData> {
+    const form = new FormData();
+    let n = 0;
+    for (const target of targets) {
+      const upload = await this.loadUpload(target.value);
+      if (target.topLevelField) {
+        form.append(target.topLevelField, upload.blob, upload.name);
+        delete params[target.topLevelField];
+      } else {
+        const part = `file${n++}`;
+        form.append(part, upload.blob, upload.name);
+        target.setAttach!(`attach://${part}`);
+      }
+    }
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null) continue;
+      form.append(key, typeof value === "object" ? JSON.stringify(value) : String(value));
+    }
+    return form;
+  }
 
-    const tempFiles: string[] = [];
-    for (const [index, target] of targets.entries()) {
+  private async loadUpload(value: string): Promise<Upload> {
+    let bytes: Uint8Array | ArrayBuffer;
+    let contentType: string | null;
+    let name: string;
+    let label: string;
+
+    if (isDataUri(value)) {
+      ({ bytes, contentType, name } = parseDataUri(value));
+      label = "data: URI";
+    } else {
       let response: Response;
       try {
-        response = await fetch(target.url, { redirect: "follow" });
+        response = await fetch(value, { redirect: "follow" });
       } catch (error) {
         throw new TelegramApiError(
-          `Could not download ${target.url}: ${(error as Error).message}. The link must be directly reachable from this machine.`,
+          `Could not download ${value}: ${(error as Error).message}. The link must be directly reachable from the Worker.`,
           0
         );
       }
       if (!response.ok) {
         throw new TelegramApiError(
-          `Could not download ${target.url} — HTTP ${response.status}. The link must point straight at the file, with no login or hotlink protection.`,
+          `Could not download ${value} — HTTP ${response.status}. The link must point straight at the file, with no login or hotlink protection.`,
           response.status
         );
       }
-      const bytes = Buffer.from(await response.arrayBuffer());
-      if (bytes.byteLength > this.config.maxFileSize) {
-        throw new TelegramApiError(
-          `${target.url} is ${(bytes.byteLength / 1048576).toFixed(1)} MB — Telegram accepts at most ` +
-            `${Math.round(this.config.maxFileSize / 1048576)} MB per upload. Send a smaller file or a shorter clip.`,
-          413
-        );
-      }
-      const filePath = join(dir, `${index}-${filenameForUrl(target.url, response.headers.get("content-type"))}`);
-      await writeFile(filePath, bytes);
-      tempFiles.push(filePath);
-      target.setter(filePath);
+      bytes = await response.arrayBuffer();
+      contentType = response.headers.get("content-type");
+      name = urlBasename(value);
+      label = value;
     }
 
-    return { params: copy, tempFiles };
+    if (bytes.byteLength > this.config.maxFileSize) {
+      throw new TelegramApiError(
+        `${label} is ${(bytes.byteLength / 1048576).toFixed(1)} MB — Telegram accepts at most ` +
+          `${Math.round(this.config.maxFileSize / 1048576)} MB per upload. Send a smaller file or a shorter clip.`,
+        413
+      );
+    }
+    const type = contentType ?? "application/octet-stream";
+    return { blob: new Blob([bytes], { type }), name: filenameFor(name, contentType) };
   }
 
   private applyDefaults(params: Record<string, unknown>): Record<string, unknown> {
@@ -260,15 +305,11 @@ export class TelegramClient {
 
   private async callWithRetry(
     method: string,
-    params: Record<string, unknown>,
-    hasFiles: boolean,
+    send: () => Promise<unknown>,
     attempt = 1
   ): Promise<unknown> {
     try {
-      const result = hasFiles
-        ? await this.callMultipart(method, params)
-        : await this.callJson(method, params);
-
+      const result = await send();
       this.circuitBreaker.recordSuccess();
       return result;
     } catch (error) {
@@ -285,15 +326,13 @@ export class TelegramClient {
       if (err.statusCode === 429) {
         if (attempt <= this.config.maxRetries) {
           const retryAfter = err.retryAfter ?? 5;
-          const waitMs = retryAfter * 1000;
           log("warn", `Rate limited on ${method}, waiting ${retryAfter}s (attempt ${attempt}/${this.config.maxRetries})`);
-          await sleep(waitMs);
-          return this.callWithRetry(method, params, hasFiles, attempt + 1);
+          await sleep(retryAfter * 1000);
+          return this.callWithRetry(method, send, attempt + 1);
         }
-        throw error; // Exhausted retries on 429
+        throw error;
       }
 
-      // Record failure for circuit breaker (429 already handled above)
       const justOpened = this.circuitBreaker.recordFailure(err.statusCode);
       if (justOpened) {
         log("error", `Circuit breaker OPENED after ${this.config.circuitBreakerThreshold} failures`);
@@ -304,89 +343,38 @@ export class TelegramClient {
         const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 10_000);
         log("warn", `Retrying ${method} in ${backoffMs}ms (attempt ${attempt + 1}/${this.config.maxRetries})`);
         await sleep(backoffMs);
-        return this.callWithRetry(method, params, hasFiles, attempt + 1);
+        return this.callWithRetry(method, send, attempt + 1);
       }
 
       throw error;
     }
   }
 
-  private async callJson(method: string, params: Record<string, unknown>): Promise<unknown> {
-    const url = `${this.baseUrl}/${method}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(params),
-        signal: controller.signal,
-      });
-      return this.handleResponse(method, response);
-    } finally {
-      clearTimeout(timeout);
-    }
+  private postJson(method: string, params: Record<string, unknown>): Promise<unknown> {
+    return this.post(method, {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
   }
 
-  private async callMultipart(method: string, params: Record<string, unknown>): Promise<unknown> {
-    const url = `${this.baseUrl}/${method}`;
-    const formData = new FormData();
+  private postForm(method: string, form: FormData): Promise<unknown> {
+    return this.post(method, { body: form });
+  }
 
-    for (const [key, value] of Object.entries(params)) {
-      if (value === undefined || value === null) continue;
-
-      if (typeof value === "string" && (await this.isLocalFile(value))) {
-        const file = await this.readLocalFile(value);
-        formData.append(key, file, basename(value));
-      } else if (key === "media" && typeof value === "object") {
-        // sendMediaGroup (array) / editMessageMedia (object): local paths inside InputMedia go via attach://
-        const rewritten = Array.isArray(value)
-          ? await this.attachInputMediaFiles(value, formData)
-          : (await this.attachInputMediaFiles([value], formData))[0];
-        formData.append(key, JSON.stringify(rewritten));
-      } else if (key === "rich_message" && typeof value === "object" && value !== null) {
-        // sendRichMessage: the InputMedia sits one level deeper, inside rich_message.media[].media,
-        // and the markdown/html references it as tg://photo|video|audio?id=<id>. Same attach:// trick.
-        const rich = structuredClone(value) as Record<string, unknown>;
-        const entries = rich.media;
-        if (Array.isArray(entries)) {
-          const counter = { n: 0 }; // one namespace for the whole post, or names collide
-          const rewritten: unknown[] = [];
-          for (const entry of entries) {
-            if (typeof entry !== "object" || entry === null) {
-              rewritten.push(entry);
-              continue;
-            }
-            const item = { ...(entry as Record<string, unknown>) };
-            const inner = item.media;
-            if (typeof inner === "object" && inner !== null) {
-              item.media = (await this.attachInputMediaFiles([inner], formData, counter))[0];
-              rewritten.push(item);
-            } else {
-              rewritten.push((await this.attachInputMediaFiles([item], formData, counter))[0]);
-            }
-          }
-          rich.media = rewritten;
-        }
-        formData.append(key, JSON.stringify(rich));
-      } else if (typeof value === "object") {
-        formData.append(key, JSON.stringify(value));
-      } else {
-        formData.append(key, String(value));
-      }
-    }
-
+  private async post(method: string, init: RequestInit): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
     try {
-      const response = await fetch(url, {
+      const response = await fetch(`${this.baseUrl}/${method}`, {
+        ...init,
         method: "POST",
-        body: formData,
         signal: controller.signal,
       });
-      return this.handleResponse(method, response);
+      return await this.handleResponse(method, response);
+    } catch (error) {
+      if (error instanceof TelegramApiError) throw error;
+      // fetch errors can echo the request URL, which contains the token
+      throw new Error(maskToken((error as Error).message, this.token));
     } finally {
       clearTimeout(timeout);
     }
@@ -418,102 +406,8 @@ export class TelegramClient {
     return data.result;
   }
 
-  /** Rewrite local file paths inside InputMedia[] to attach://<name>, appending the files to the form. */
-  private async attachInputMediaFiles(
-    media: unknown[],
-    formData: FormData,
-    counter: { n: number } = { n: 0 }
-  ): Promise<unknown[]> {
-    const result: unknown[] = [];
-
-    for (const entry of media) {
-      if (typeof entry !== "object" || entry === null) {
-        result.push(entry);
-        continue;
-      }
-      const item = { ...(entry as Record<string, unknown>) };
-      for (const field of ["media", "thumbnail", "cover"]) {
-        const val = item[field];
-        if (typeof val === "string" && (await this.isLocalFile(val))) {
-          const name = `file${counter.n++}`;
-          formData.append(name, await this.readLocalFile(val), basename(val));
-          item[field] = `attach://${name}`;
-        }
-      }
-      result.push(item);
-    }
-
-    return result;
-  }
-
-  private hasFileParams(params: Record<string, unknown>): boolean {
-    const fileFields = new Set<string>(FILE_FIELDS);
-
-    for (const [key, value] of Object.entries(params)) {
-      if (fileFields.has(key) && typeof value === "string") {
-        if (isAbsolute(value)) return true;
-      }
-    }
-
-    // InputMedia paths live in media[].media / media[].thumbnail — for sendMediaGroup,
-    // editMessageMedia and the rich_message.media entries alike
-    for (const item of inputMediaObjects(params)) {
-      for (const field of ["media", "thumbnail", "cover"]) {
-        if (typeof item[field] === "string" && isAbsolute(item[field] as string)) return true;
-      }
-    }
-
-    return false;
-  }
-
-  private async isLocalFile(value: string): Promise<boolean> {
-    if (!isAbsolute(value)) return false;
-    try {
-      const info = await stat(value);
-      return info.isFile();
-    } catch {
-      return false;
-    }
-  }
-
-  private async readLocalFile(filePath: string): Promise<Blob> {
-    const resolved = resolve(normalize(filePath));
-
-    // Path traversal protection: require trailing separator in comparison.
-    // The mirror dir holds files this server downloaded itself, so it is always allowed —
-    // otherwise TELEGRAM_ALLOWED_UPLOAD_DIRS would block the URL-upload fallback.
-    if (this.config.allowedUploadDirs.length > 0 && !resolved.startsWith(this.mirrorDir + sep)) {
-      const isAllowed = this.config.allowedUploadDirs.some((dir) => {
-        const normalizedDir = resolve(normalize(dir));
-        const dirWithSep = normalizedDir.endsWith(sep) ? normalizedDir : normalizedDir + sep;
-        return resolved.startsWith(dirWithSep) || resolved === normalizedDir;
-      });
-      if (!isAllowed) {
-        throw new Error(
-          `File upload blocked: ${resolved} is not in allowed directories. ` +
-            `Set TELEGRAM_ALLOWED_UPLOAD_DIRS to allow specific paths.`
-        );
-      }
-    }
-
-    const info = await stat(resolved);
-    if (info.size > this.config.maxFileSize) {
-      throw new Error(
-        `File too large: ${(info.size / 1024 / 1024).toFixed(1)}MB exceeds ` +
-          `limit of ${(this.config.maxFileSize / 1024 / 1024).toFixed(0)}MB`
-      );
-    }
-
-    const buffer = await readFile(resolved);
-    return new Blob([buffer]);
-  }
-
-  /**
-   * Fetch a file's bytes by file_id (getFile + download). Works on any
-   * runtime; the caller decides where the bytes go.
-   */
+  /** Fetch a file's bytes by file_id (getFile + download). */
   async fetchFile(fileId: string): Promise<{ fileName: string; data: ArrayBuffer }> {
-    // Step 1: getFile to get file_path
     const fileInfo = (await this.call("getFile", { file_id: fileId })) as {
       file_id: string;
       file_path?: string;
@@ -524,7 +418,6 @@ export class TelegramClient {
       throw new Error("Telegram returned no file_path — file may be too large (>20MB)");
     }
 
-    // Step 2: download from https://api.telegram.org/file/bot<token>/<file_path>
     const url = `https://api.telegram.org/file/bot${this.token}/${fileInfo.file_path}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 120_000);
@@ -542,23 +435,6 @@ export class TelegramClient {
     } finally {
       clearTimeout(timeout);
     }
-  }
-
-  /** Download a file by file_id. Returns the local path. */
-  async downloadFile(fileId: string, destDir: string): Promise<string> {
-    const { fileName, data } = await this.fetchFile(fileId);
-    const destPath = resolve(normalize(join(destDir, fileName)));
-
-    // Security: ensure dest is inside destDir
-    const normalizedDir = resolve(normalize(destDir));
-    if (!destPath.startsWith(normalizedDir + sep) && destPath !== normalizedDir) {
-      throw new Error(`Path traversal blocked: ${destPath} is not inside ${normalizedDir}`);
-    }
-
-    await mkdir(dirname(destPath), { recursive: true });
-    await writeFile(destPath, Buffer.from(data));
-
-    return destPath;
   }
 }
 

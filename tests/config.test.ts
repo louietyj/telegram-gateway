@@ -24,7 +24,6 @@ describe("Config", () => {
     expect(config.globalRateLimit).toBe(30);
     expect(config.perChatRateLimit).toBe(20);
     expect(config.maxRetries).toBe(3);
-    expect(config.allowedUploadDirs).toEqual([]);
   });
 
   it("loads all optional values", () => {
@@ -34,7 +33,6 @@ describe("Config", () => {
     process.env.TELEGRAM_GLOBAL_RATE_LIMIT = "10";
     process.env.TELEGRAM_PER_CHAT_RATE_LIMIT = "5";
     process.env.TELEGRAM_MAX_RETRIES = "5";
-    process.env.TELEGRAM_ALLOWED_UPLOAD_DIRS = "/tmp,/home/user/uploads";
 
     const config = loadConfig();
     expect(config.defaultChatId).toBe("-100123");
@@ -42,6 +40,5 @@ describe("Config", () => {
     expect(config.globalRateLimit).toBe(10);
     expect(config.perChatRateLimit).toBe(5);
     expect(config.maxRetries).toBe(5);
-    expect(config.allowedUploadDirs).toEqual(["/tmp", "/home/user/uploads"]);
   });
 });

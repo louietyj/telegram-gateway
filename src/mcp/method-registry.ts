@@ -110,7 +110,7 @@ export const Caption = z
   })
   .describe("Caption (0-1024 visible chars; HTML tags/URLs excluded)");
 export const ParseMode = z.enum(["HTML", "Markdown", "MarkdownV2"]).describe("Formatting mode");
-export const FileInput = z.string().describe("File ID, HTTP URL, or absolute file path");
+export const FileInput = z.string().describe("File ID, HTTP(S) URL, or data:<mime>;name=<filename>;base64,<bytes> URI");
 export const ReplyMarkup = z.any().describe("InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove, or ForceReply");
 export const ReplyParameters = z.any().describe("ReplyParameters object");
 export const MessageEntities = z.any().describe("Array of MessageEntity objects");

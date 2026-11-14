@@ -1,8 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { TelegramClient, TelegramApiError } from "../src/telegram/telegram-client.js";
+import { TelegramClient, TelegramApiError, parseDataUri } from "../src/telegram/telegram-client.js";
 import { Config } from "../src/core/config.js";
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
@@ -13,7 +10,6 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     maxRetries: 1,
     circuitBreakerThreshold: 5,
     circuitBreakerCooldown: 30000,
-    allowedUploadDirs: [],
     maxFileSize: 50 * 1024 * 1024,
     ...overrides,
   };
@@ -181,13 +177,47 @@ describe("TelegramClient", () => {
     clientWithThread.destroy();
   });
 
-  it("uploads local files inside sendMediaGroup via attach://", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "tg-attach-"));
-    const first = join(dir, "a.jpg");
-    const second = join(dir, "b.jpg");
-    await writeFile(first, Buffer.from([0xff, 0xd8, 0xff]));
-    await writeFile(second, Buffer.from([0xff, 0xd8, 0xff]));
+  const JPEG = "data:image/jpeg;base64,/9j/";
 
+  it("uploads a data: URI as a multipart part named after the field", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      json: () => Promise.resolve({ ok: true, result: { message_id: 1 } }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await client.call("sendDocument", {
+      chat_id: 1,
+      document: "data:application/pdf;name=itinerary.pdf;base64,JVBERi0=",
+      caption: "plan",
+    });
+
+    const form = mockFetch.mock.calls[0][1].body as FormData;
+    const file = form.get("document") as File;
+    expect(file).toBeInstanceOf(Blob);
+    expect(file.name).toBe("itinerary.pdf");
+    expect(file.type).toBe("application/pdf");
+    expect(new TextDecoder().decode(await file.arrayBuffer())).toBe("%PDF-");
+    expect(form.get("caption")).toBe("plan");
+    expect(form.get("chat_id")).toBe("1");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("names an unnamed data: URI from its MIME type", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      json: () => Promise.resolve({ ok: true, result: {} }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await client.call("sendPhoto", { chat_id: 1, photo: JPEG });
+
+    const form = mockFetch.mock.calls[0][1].body as FormData;
+    expect((form.get("photo") as File).name).toBe("file.jpg");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("uploads data: URIs inside sendMediaGroup via attach://", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       json: () => Promise.resolve({ ok: true, result: [] }),
     });
@@ -196,59 +226,23 @@ describe("TelegramClient", () => {
     await client.call("sendMediaGroup", {
       chat_id: 1,
       media: [
-        { type: "photo", media: first, caption: "a" },
-        { type: "photo", media: second },
+        { type: "photo", media: JPEG, caption: "a" },
+        { type: "photo", media: "AgACAgIAAxkBAAI-file-id" },
+        { type: "photo", media: JPEG },
       ],
     });
 
     const form = mockFetch.mock.calls[0][1].body as FormData;
     const media = JSON.parse(form.get("media") as string);
-    expect(media[0].media).toBe("attach://file0");
-    expect(media[1].media).toBe("attach://file1");
+    expect(media.map((m: { media: string }) => m.media))
+      .toEqual(["attach://file0", "AgACAgIAAxkBAAI-file-id", "attach://file1"]);
     expect(form.get("file0")).toBeInstanceOf(Blob);
     expect(form.get("file1")).toBeInstanceOf(Blob);
 
     vi.unstubAllGlobals();
-    await rm(dir, { recursive: true, force: true });
   });
 
-  it("uploads local files inside rich_message.media via attach://", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "tg-rich-"));
-    const clip = join(dir, "trailer.mp4");
-    const cover = join(dir, "cover.jpg");
-    await writeFile(clip, Buffer.from([0x00, 0x00, 0x00, 0x18]));
-    await writeFile(cover, Buffer.from([0xff, 0xd8, 0xff]));
-
-    const mockFetch = vi.fn().mockResolvedValue({
-      json: () => Promise.resolve({ ok: true, result: {} }),
-    });
-    vi.stubGlobal("fetch", mockFetch);
-
-    await client.call("sendRichMessage", {
-      chat_id: 1,
-      rich_message: {
-        markdown: "# Post\n\n![](tg://video?id=trailer \"Caption\")",
-        media: [{ id: "trailer", media: { type: "video", media: clip, cover } }],
-      },
-    });
-
-    const form = mockFetch.mock.calls[0][1].body as FormData;
-    const rich = JSON.parse(form.get("rich_message") as string);
-    expect(rich.media[0].id).toBe("trailer");
-    expect(rich.media[0].media.media).toBe("attach://file0");
-    expect(rich.media[0].media.cover).toBe("attach://file1");
-    expect(form.get("file0")).toBeInstanceOf(Blob);
-    expect(form.get("file1")).toBeInstanceOf(Blob);
-
-    vi.unstubAllGlobals();
-    await rm(dir, { recursive: true, force: true });
-  });
-
-  it("accepts rich_message passed as a JSON string", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "tg-rich-str-"));
-    const clip = join(dir, "clip.mp4");
-    await writeFile(clip, Buffer.from([0x00, 0x00, 0x00, 0x18]));
-
+  it("uploads data: URIs inside rich_message.media (passed as a JSON string)", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       json: () => Promise.resolve({ ok: true, result: {} }),
     });
@@ -257,17 +251,36 @@ describe("TelegramClient", () => {
     await client.call("sendRichMessage", {
       chat_id: 1,
       rich_message: JSON.stringify({
-        markdown: "![](tg://video?id=v0)",
-        media: [{ id: "v0", media: { type: "video", media: clip } }],
+        markdown: "![](tg://video?id=trailer \"Caption\")",
+        media: [{ id: "trailer", media: { type: "video", media: "data:video/mp4;base64,AAAAGA==", cover: JPEG } }],
       }),
     });
 
     const form = mockFetch.mock.calls[0][1].body as FormData;
     const rich = JSON.parse(form.get("rich_message") as string);
+    expect(rich.media[0].id).toBe("trailer");
     expect(rich.media[0].media.media).toBe("attach://file0");
+    expect(rich.media[0].media.cover).toBe("attach://file1");
 
     vi.unstubAllGlobals();
-    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("passes absolute paths through as plain strings, never reading the disk", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      json: () => Promise.resolve({ ok: false, error_code: 400, description: "Bad Request: wrong file identifier" }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(client.call("sendDocument", { chat_id: 1, document: "/etc/passwd" })).rejects.toThrow(TelegramApiError);
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).document).toBe("/etc/passwd");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects malformed data: URIs", () => {
+    expect(() => parseDataUri("data:image/png;base64")).toThrow(/no comma/);
+    expect(() => parseDataUri("data:image/png;base64,***")).toThrow(/invalid base64/);
+    expect(new TextDecoder().decode(parseDataUri("data:,hi%20there").bytes)).toBe("hi there");
   });
 
   it("accepts media passed as a JSON string", async () => {
