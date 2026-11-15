@@ -1,198 +1,129 @@
-import { z } from "zod";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Config } from "../core/config.js";
-import { TelegramClient, TelegramApiError } from "../telegram/telegram-client.js";
-import { MethodDef, buildZodSchema } from "./method-registry.js";
-import { exposedMethods } from "./methods/index.js";
-import { CircuitOpenError } from "../core/circuit-breaker.js";
-import { FORMATS, findFormat, formatIndex } from "./formats.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import type { Api } from "grammy";
+import { createTools, type ToolDefinition } from "grammy-mcp";
 import { Store } from "../store/store.js";
 import { Reader } from "../store/read.js";
-import { registerHistoryTools } from "./history-tools.js";
-import { registerFileTool } from "./file-tool.js";
-
-/** Pre-built Zod schemas for all methods (built once, reused on every call). */
-const schemaCache = new Map<string, ReturnType<typeof buildZodSchema>>();
-
-function getSchema(
-  method: MethodDef,
-  defaultChatId?: string
-): ReturnType<typeof buildZodSchema> {
-  const cacheKey = defaultChatId ? `${method.apiMethod}:default-chat` : method.apiMethod;
-  let schema = schemaCache.get(cacheKey);
-  if (!schema) {
-    schema = buildZodSchema(method.params, { defaultChatId });
-    schemaCache.set(cacheKey, schema);
-  }
-  return schema;
-}
-
-interface Context {
-  config: Config;
-  client: TelegramClient;
-  store: Store;
-  /** The caller's self-declared name, recorded on what it sends. */
-  clientName: string | null;
-}
-
-/** Build a fully-registered MCP server + its Telegram client (transport-agnostic). */
-export function buildServer(
-  config: Config,
-  store: Store,
-  reader: Reader,
-  clientName: string | null
-): { server: McpServer; client: TelegramClient } {
-  const client = new TelegramClient(config);
-  const ctx: Context = { config, client, store, clientName };
-
-  const server = new McpServer({
-    name: "telegram-gateway",
-    version: "0.1.0",
-  });
-
-  registerAllTools(server, ctx);
-  registerFormatTool(server);
-  registerHistoryTools(server, reader);
-  registerFileTool(server, client);
-
-  return { server, client };
-}
-
-function registerAllTools(server: McpServer, ctx: Context): void {
-  for (const method of exposedMethods) {
-    const zodSchema = getSchema(method, ctx.config.defaultChatId);
-
-    const annotations = method.annotations || { destructiveHint: false };
-
-    server.tool(
-      method.toolName,
-      method.description,
-      zodSchema.shape,
-      annotations,
-      async (params) => {
-        return callTelegram(ctx, method, params as Record<string, unknown>);
-      }
-    );
-  }
-}
-
-// ─── Formats ───────────────────────────────────────────────────────────
+import { historyTools } from "./history-tools.js";
+import { downloadFileTool } from "./file-tool.js";
+import { formatTool } from "./format-tool.js";
+import { type LocalTool, type ToolResult } from "./local-tool.js";
 
 /**
- * A JSON Schema can say `rich_message: object`; it cannot teach an agent what a rich
- * post is or how its markdown works. This tool answers that question before anything
- * is sent, so a malformed post never reaches a channel to find out.
+ * Never exposed: they break the Worker's ownership of the update flow (getUpdates
+ * conflicts with the webhook; the webhook is set by the admin route) or do something
+ * to the bot that Telegram can't refuse.
  */
-function registerFormatTool(server: McpServer): void {
-  server.tool(
-    "telegram_format",
-    "Ask what shape a structured Telegram parameter must have BEFORE sending. Call this whenever you " +
-      "are about to build a rich post, an album, a keyboard, or a poll and are not certain of the exact " +
-      "syntax. Topics: " + FORMATS.map((f) => f.topic).join(", ") + ". Omit the topic to list them all. " +
-      "For a post longer than a 1024-character caption, ask for 'rich_message'.",
-    {
-      topic: z.string().optional().describe(
-        "Format to explain — a topic ('rich_message', 'media', 'reply_markup', 'poll'), a tool name " +
-        "('send_rich_message', 'send_media_group'), or plain wording ('long post', 'table', 'album', 'buttons')"
-      ),
-    },
-    { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async (params) => {
-      if (!params.topic) {
-        return { content: [{ type: "text" as const, text: formatIndex() }] };
+export const BLOCKED_TOOLS = [
+  "getUpdates", "setWebhook", "deleteWebhook", "logOut", "close", "leaveChat",
+];
+
+export interface ServerOptions {
+  api: Api;
+  token: string;
+  store: Store;
+  reader: Reader;
+  /** The caller's self-declared name, recorded on what it sends. */
+  clientName: string | null;
+  /** Filled in when a tool's chat_id is omitted. */
+  defaultChatId?: string;
+}
+
+/**
+ * Bot messages never come back as updates, so every successful call through `api` is
+ * recorded: sends and edits as messages, deletes as deletions.
+ */
+function recordOutgoing(api: Api, o: ServerOptions, failures: string[]): void {
+  api.config.use(async (prev, method, payload, signal) => {
+    const response = await prev(method, payload, signal);
+    if (!response.ok) return response;
+    const p = payload as Record<string, unknown>;
+    try {
+      if (method === "deleteMessage" || method === "deleteMessages") {
+        const ids = method === "deleteMessage" ? [p.message_id] : (p.message_ids as unknown[]);
+        const chatId = Number(p.chat_id);
+        if (Number.isFinite(chatId)) await o.store.markDeleted(chatId, ids.map(Number));
+      } else {
+        await o.store.recordOutgoing(response.result, o.clientName);
       }
-      const doc = findFormat(params.topic);
-      if (!doc) {
-        return {
-          content: [{ type: "text" as const, text: `No format named "${params.topic}".\n\n${formatIndex()}` }],
-          isError: true,
-        };
-      }
-      return {
-        content: [{
-          type: "text" as const,
-          text: `${doc.body}\n\n---\nApplies to: ${doc.applies}`,
-        }],
-      };
+    } catch (error) {
+      failures.push((error as Error).message);
     }
+    return response;
+  });
+}
+
+/** Make chat_id optional where the default chat can stand in for it. */
+function withDefaultChat(definition: ToolDefinition, defaultChatId: string): ToolDefinition {
+  const schema = definition.inputSchema;
+  const required = (schema.required as string[] | undefined) ?? [];
+  if (!required.includes("chat_id")) return definition;
+  const properties = schema.properties as Record<string, Record<string, unknown>>;
+  return {
+    ...definition,
+    inputSchema: {
+      ...schema,
+      required: required.filter((r) => r !== "chat_id"),
+      properties: {
+        ...properties,
+        chat_id: {
+          ...properties.chat_id,
+          description: `${properties.chat_id.description ?? ""} Defaults to ${defaultChatId}.`.trim(),
+        },
+      },
+    },
+  };
+}
+
+export function buildServer(o: ServerOptions): Server {
+  const failures: string[] = [];
+  recordOutgoing(o.api, o, failures);
+
+  const botTools = createTools(o.api, { deny: BLOCKED_TOOLS, fetchUrls: true });
+  const chatTools = new Set<string>();
+  const botDefinitions = botTools.definitions.map((definition) => {
+    if (!o.defaultChatId) return definition;
+    const adjusted = withDefaultChat(definition, o.defaultChatId);
+    if (adjusted !== definition) chatTools.add(definition.name);
+    return adjusted;
+  });
+
+  const local = new Map<string, LocalTool>(
+    [...historyTools(o.reader), downloadFileTool(o.api, o.token), formatTool()]
+      .map((t) => [t.definition.name, t]),
   );
 
-  for (const doc of FORMATS) {
-    server.resource(
-      `format-${doc.topic}`,
-      `telegram://format/${doc.topic}`,
-      { description: doc.summary, mimeType: "text/markdown" },
-      async (uri) => ({
-        contents: [{ uri: uri.href, mimeType: "text/markdown", text: doc.body }],
-      })
-    );
-  }
-}
-
-// ─── Execution ──────────────────────────────────────────────────────────
-
-/** Params arrive already validated by the SDK. */
-async function callTelegram(
-  ctx: Context,
-  method: MethodDef,
-  params: Record<string, unknown>
-): Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
-  try {
-    const result = await ctx.client.call(method.apiMethod, params);
-    let text = formatResult(method.apiMethod, result);
-    try {
-      await recordOutgoing(ctx, method.apiMethod, params, result);
-    } catch (error) {
-      // The call itself succeeded; say so rather than inviting a retry that double-sends.
-      text += `\n\nWarning: sent, but not recorded in history: ${(error as Error).message}`;
+  async function call(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+    const tool = local.get(name);
+    if (tool) return tool.call(args);
+    if (chatTools.has(name) && args.chat_id === undefined) {
+      args = { ...args, chat_id: o.defaultChatId };
     }
-    return { content: [{ type: "text", text }] };
-  } catch (error) {
-    const message = error instanceof CircuitOpenError
-      ? error.message
-      : error instanceof TelegramApiError
-        ? error.message
-        : `Unexpected error: ${(error as Error).message}`;
-
-    return {
-      content: [{ type: "text", text: message }],
-      isError: true,
-    };
-  }
-}
-
-/** Bot messages never come back as updates, so the Worker records what it sends, edits and deletes. */
-async function recordOutgoing(
-  ctx: Context,
-  apiMethod: string,
-  params: Record<string, unknown>,
-  result: unknown
-): Promise<void> {
-  if (apiMethod === "deleteMessage" || apiMethod === "deleteMessages") {
-    const chatId = Number(params.chat_id ?? ctx.config.defaultChatId);
-    const ids = apiMethod === "deleteMessage" ? [params.message_id] : (params.message_ids as unknown[]);
-    if (Number.isFinite(chatId)) await ctx.store.markDeleted(chatId, ids.map(Number));
-    return;
-  }
-  await ctx.store.recordOutgoing(result, ctx.clientName);
-}
-
-const MAX_RESPONSE_LENGTH = 100_000;
-
-function formatResult(method: string, result: unknown): string {
-  if (result === true) return `${method}: Success`;
-
-  let text: string;
-  if (typeof result === "object" && result !== null) {
-    text = JSON.stringify(result, null, 2);
-  } else {
-    text = String(result);
+    failures.length = 0;
+    const result = await botTools.call(name, args);
+    if (!result.isError && failures.length > 0) {
+      // The call itself succeeded; say so rather than inviting a retry that double-sends.
+      result.content.push({
+        type: "text",
+        text: `Warning: sent, but not recorded in history: ${failures.join("; ")}`,
+      });
+    }
+    return result;
   }
 
-  // Truncate to prevent filling context window
-  if (text.length > MAX_RESPONSE_LENGTH) {
-    text = text.slice(0, MAX_RESPONSE_LENGTH) + `\n\n... [truncated, ${text.length} chars total]`;
-  }
-
-  return text;
+  const server = new Server(
+    { name: "telegram-gateway", version: "0.2.0" },
+    { capabilities: { tools: {} } },
+  );
+  server.setRequestHandler(ListToolsRequestSchema, () => ({
+    tools: [...botDefinitions, ...[...local.values()].map((t) => t.definition)],
+  }));
+  server.setRequestHandler(
+    CallToolRequestSchema,
+    (request) => call(request.params.name, request.params.arguments ?? {}),
+  );
+  return server;
 }

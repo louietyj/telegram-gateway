@@ -1,10 +1,24 @@
-import { RICH_MESSAGE_LIMITS } from "./method-registry.js";
+// A rich message is the long-form post format: headings, lists, tables,
+// collages, footnotes and inline media in a single message. It replaces the
+// 1024-character caption ceiling of sendPhoto & co with the limits below.
+export const RICH_MESSAGE_LIMITS = {
+  /** UTF-8 characters of text, including custom emoji alt text and formula source */
+  text: 32768,
+  /** blocks, including nested blocks, list items, table rows, quotations, details */
+  blocks: 500,
+  /** photos + videos + audio files in total */
+  media: 50,
+  /** columns in a table */
+  tableColumns: 20,
+  /** levels of nested formatting and blocks */
+  nesting: 16,
+} as const;
 
 /**
  * Structured parameters Telegram accepts only in one exact shape — rich messages,
  * InputMedia arrays, keyboards, poll options. The JSON Schema can say "object";
  * it cannot teach the syntax, so the server carries the reference itself and
- * hands it out through the `telegram_format` tool before anything is sent.
+ * hands it out through the `telegramFormat` tool before anything is sent.
  */
 export interface FormatDoc {
   /** Lookup key, also the name shown in listings */
@@ -19,7 +33,7 @@ export interface FormatDoc {
 
 const RICH_MESSAGE: FormatDoc = {
   topic: "rich_message",
-  applies: "send_rich_message, send_rich_message_draft, edit_message_text (rich_message param)",
+  applies: "sendRichMessage, sendRichMessageDraft, editMessageText(Inline) (text_or_rich_message param)",
   summary: `Long-form post: up to ${RICH_MESSAGE_LIMITS.text} characters with headings, tables, lists and up to ${RICH_MESSAGE_LIMITS.media} images.`,
   body: `# rich_message (InputRichMessage)
 
@@ -114,19 +128,19 @@ HTML-only features (no Markdown equivalent):
 <details open><summary>Title</summary>…</details>
 <tg-map lat="41.9" long="12.5" zoom="14"/>
 <tg-collage> … </tg-collage>   <tg-slideshow> … </tg-slideshow>
-<tg-thinking>…</tg-thinking>   (send_rich_message_draft only)
+<tg-thinking>…</tg-thinking>   (sendRichMessageDraft only)
 \`\`\`
 Escape a literal \`#\` at the start of a line as \`\\#\`. Inside markdown you do NOT HTML-escape
 \`&\`, \`<\`, \`>\` the way you must in a \`caption\`.
 
 ## Drafts
-\`send_rich_message_draft\` streams a partial message as a temporary 30-second preview in a private
-chat; it does not persist. Send the finished content with \`send_rich_message\` afterwards.`,
+\`sendRichMessageDraft\` streams a partial message as a temporary 30-second preview in a private
+chat; it does not persist. Send the finished content with \`sendRichMessage\` afterwards.`,
 };
 
 const CAPTION: FormatDoc = {
   topic: "caption",
-  applies: "send_photo, send_video, send_audio, send_document, send_animation, send_voice, send_paid_media, send_live_photo, copy_message, edit_message_caption",
+  applies: "sendPhoto, sendVideo, sendAudio, sendDocument, sendAnimation, sendVoice, sendPaidMedia, sendLivePhoto, copyMessage, editMessageCaption",
   summary: "Media caption: 1024 visible characters, HTML or Markdown. Use rich_message for anything longer.",
   body: `# caption
 
@@ -142,18 +156,18 @@ With \`parse_mode: "HTML"\`:
 \`\`\`
 Escape \`&\` → \`&amp;\`, \`<\` → \`&lt;\`, \`>\` → \`&gt;\` in any text you did not write yourself.
 
-**A post longer than 1024 characters does not belong in a caption.** Use \`send_rich_message\`
+**A post longer than 1024 characters does not belong in a caption.** Use \`sendRichMessage\`
 (${RICH_MESSAGE_LIMITS.text} characters, ${RICH_MESSAGE_LIMITS.media} images) — ask for the
 \`rich_message\` format.`,
 };
 
 const MEDIA: FormatDoc = {
   topic: "media",
-  applies: "send_media_group, edit_message_media, send_paid_media (media param)",
+  applies: "sendMediaGroup, editMessageMedia, sendPaidMedia (media param)",
   summary: "Array of InputMedia objects; each needs a `type` and a `media` source.",
   body: `# media (InputMedia)
 
-\`send_media_group\` takes an ARRAY of 2-10 items; \`edit_message_media\` takes a single object.
+\`sendMediaGroup\` takes an ARRAY of 2-10 items; \`editMessageMedia\` takes a single object.
 
 \`\`\`json
 {
@@ -182,7 +196,7 @@ Upload ceiling is 10 MB for photos and 50 MB for other files. Captions follow th
 
 const REPLY_MARKUP: FormatDoc = {
   topic: "reply_markup",
-  applies: "every send_* and edit_message_* tool",
+  applies: "every send* and editMessage* tool",
   summary: "Keyboards: inline_keyboard (buttons under the message) or keyboard (replaces the user's keyboard).",
   body: `# reply_markup
 
@@ -211,9 +225,9 @@ Channels support inline keyboards only.`,
 
 const POLL: FormatDoc = {
   topic: "poll",
-  applies: "send_poll (options, media, explanation_media)",
+  applies: "sendPoll (options, media, explanation_media)",
   summary: "Options are objects, not strings; quizzes use correct_option_ids (an array).",
-  body: `# send_poll
+  body: `# sendPoll
 
 \`options\` is an array of OBJECTS (1-12), not plain strings:
 \`\`\`json
@@ -239,7 +253,7 @@ Channel-only: \`members_only\`, \`country_codes\` (0-12 ISO 3166-1 alpha-2 codes
 
 const CHECKLIST: FormatDoc = {
   topic: "checklist",
-  applies: "send_checklist, edit_message_checklist",
+  applies: "sendChecklist, editMessageChecklist",
   summary: "Interactive checklist; requires a business connection.",
   body: `# checklist (InputChecklist)
 
@@ -264,7 +278,7 @@ Every task needs a unique \`id\`. \`business_connection_id\` is REQUIRED for bot
 
 const REPLY_PARAMETERS: FormatDoc = {
   topic: "reply_parameters",
-  applies: "every send_* tool",
+  applies: "every send* tool",
   summary: "Reply to a message, optionally quoting part of it or replying across chats.",
   body: `# reply_parameters
 
@@ -279,7 +293,7 @@ parsing), \`quote_parse_mode\`, \`quote_position\`, \`allow_sending_without_repl
 
 const LINK_PREVIEW: FormatDoc = {
   topic: "link_preview_options",
-  applies: "send_message, edit_message_text",
+  applies: "sendMessage, editMessageText",
   summary: "Control the link preview — disable it, enlarge it, or move it above the text.",
   body: `# link_preview_options
 
@@ -289,13 +303,13 @@ const LINK_PREVIEW: FormatDoc = {
 Fields: \`is_disabled\`, \`url\` (preview a link other than the first one in the text),
 \`prefer_large_media\`, \`prefer_small_media\`, \`show_above_text\`.
 
-This used to be the trick for "a big picture above a long text". \`send_rich_message\` does that
+This used to be the trick for "a big picture above a long text". \`sendRichMessage\` does that
 properly now, with real images instead of a scraped preview.`,
 };
 
 const SUGGESTED_POST: FormatDoc = {
   topic: "suggested_post_parameters",
-  applies: "send_* tools posting into a direct messages chat",
+  applies: "send* tools posting into a direct messages chat",
   summary: "Propose a paid or scheduled post in a channel's direct messages chat.",
   body: `# suggested_post_parameters
 
@@ -401,7 +415,7 @@ export function findFormat(query: string): FormatDoc | undefined {
 /** Listing shown when no topic is given, or when the topic is not recognised. */
 export function formatIndex(): string {
   return [
-    "Formats this server can explain before you send anything — call telegram_format with one of these topics:",
+    "Formats this server can explain before you send anything — call telegramFormat with one of these topics:",
     "",
     ...FORMATS.map((f) => `- **${f.topic}** — ${f.summary}\n  applies to: ${f.applies}`),
     "",

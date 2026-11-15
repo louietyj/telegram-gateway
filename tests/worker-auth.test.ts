@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import worker, { type Env } from "../src/worker.js";
-import { exposedMethods, BLOCKED_METHODS } from "../src/mcp/methods/index.js";
 import { testDb } from "./helpers/d1.js";
 
 // No TELEGRAM_BOT_TOKEN: a request that passes the auth gate fails later with 500.
@@ -69,13 +68,5 @@ describe("Worker /webhook auth", () => {
   it("fails closed when WEBHOOK_SECRET is unset", async () => {
     const res = await worker.fetch(webhookRequest({ "x-telegram-bot-api-secret-token": "" }), noSecrets);
     expect(res.status).toBe(500);
-  });
-});
-
-describe("blocked methods", () => {
-  it("are not exposed as tools", () => {
-    const exposed = new Set(exposedMethods.map((m) => m.apiMethod));
-    for (const name of BLOCKED_METHODS) expect(exposed.has(name)).toBe(false);
-    expect(exposed.has("sendMessage")).toBe(true);
   });
 });

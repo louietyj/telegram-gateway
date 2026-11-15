@@ -68,7 +68,7 @@ export class Reader {
     if (/^-?\d+$/.test(chat)) return Number(chat);
     const row = await this.db.prepare("SELECT chat_id FROM chats WHERE username = ? COLLATE NOCASE")
       .bind(chat.replace(/^@/, "")).first<{ chat_id: number }>();
-    if (!row) throw new Error(`No known chat ${chat}. Use history_chats to list chats.`);
+    if (!row) throw new Error(`No known chat ${chat}. Use historyChats to list chats.`);
     return row.chat_id;
   }
 

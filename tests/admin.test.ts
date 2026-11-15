@@ -19,14 +19,14 @@ describe("/admin/webhook", () => {
   });
 
   it("points the webhook at this Worker with the secret, keeping the backlog", async () => {
-    const fetchMock = stubTelegram(() => true);
+    const calls = stubTelegram(() => true);
 
     const res = await worker.fetch(admin("POST"), env);
 
     expect(res.status).toBe(200);
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toMatch(/\/setWebhook$/);
-    expect(JSON.parse(init!.body as string)).toEqual({
+    const [method, payload] = calls.mock.calls[0];
+    expect(method).toBe("setWebhook");
+    expect(payload).toEqual({
       url: "https://gw.example.workers.dev/webhook",
       secret_token: "hook",
       allowed_updates: ["message", "edited_message", "channel_post", "edited_channel_post", "my_chat_member", "callback_query"],
@@ -35,12 +35,12 @@ describe("/admin/webhook", () => {
   });
 
   it("shows and deletes the webhook", async () => {
-    const fetchMock = stubTelegram((m) => (m === "getWebhookInfo" ? { url: "x", pending_update_count: 3 } : true));
+    const calls = stubTelegram((m) => (m === "getWebhookInfo" ? { url: "x", pending_update_count: 3 } : true));
 
     const info = await worker.fetch(admin("GET"), env);
     expect(await info.json()).toEqual({ ok: true, result: { url: "x", pending_update_count: 3 } });
 
     await worker.fetch(admin("DELETE"), env);
-    expect(String(fetchMock.mock.calls[1][0])).toMatch(/\/deleteWebhook$/);
+    expect(calls.mock.calls[1][0]).toBe("deleteWebhook");
   });
 });

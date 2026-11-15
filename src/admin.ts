@@ -1,4 +1,4 @@
-import { TelegramClient } from "./telegram/telegram-client.js";
+import type { Api } from "grammy";
 
 /**
  * Updates the webhook subscribes to. message_reaction and chat_member are left out: both
@@ -6,7 +6,7 @@ import { TelegramClient } from "./telegram/telegram-client.js";
  */
 export const ALLOWED_UPDATES = [
   "message", "edited_message", "channel_post", "edited_channel_post", "my_chat_member", "callback_query",
-];
+] as const;
 
 /**
  * /admin/webhook — GET shows getWebhookInfo; POST points the bot's webhook at this Worker;
@@ -15,21 +15,20 @@ export const ALLOWED_UPDATES = [
  */
 export async function handleAdminWebhook(
   request: Request,
-  client: TelegramClient,
+  api: Api,
   webhookSecret: string
 ): Promise<unknown> {
   switch (request.method) {
     case "GET":
-      return client.call("getWebhookInfo");
+      return api.getWebhookInfo();
     case "POST":
-      return client.call("setWebhook", {
-        url: new URL("/webhook", request.url).toString(),
+      return api.setWebhook(new URL("/webhook", request.url).toString(), {
         secret_token: webhookSecret,
         allowed_updates: ALLOWED_UPDATES,
         drop_pending_updates: false,
       });
     case "DELETE":
-      return client.call("deleteWebhook", { drop_pending_updates: false });
+      return api.deleteWebhook({ drop_pending_updates: false });
     default:
       throw new Error(`method ${request.method} not allowed`);
   }

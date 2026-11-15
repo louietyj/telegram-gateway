@@ -30,12 +30,12 @@ describe("history tools", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("lists chats", async () => {
-    const res = await call("history_chats");
+    const res = await call("historyChats");
     expect(res.text).toBe(`${GROUP.id} · group · "Alaska TEST" · 3 messages · last 2025-11-14 19:55Z`);
   });
 
   it("shows the latest messages oldest first, current versions only", async () => {
-    const res = await call("history_messages", { chat_id: GROUP.id });
+    const res = await call("historyMessages", { chat_id: GROUP.id });
     const lines = res.text.split("\n");
     expect(lines[0]).toBe("[seq 1] 2025-11-14 19:53Z #1 Mum (111): What time is the aurora tour?");
     // An edit keeps the message's original place in the chat.
@@ -47,28 +47,28 @@ describe("history tools", () => {
 
   it("follows a cursor, including the bot's own sends", async () => {
     stubTelegram((_m, p) => message({ message_id: 4, date: T0 + 200, from: BOT, text: p.text }));
-    await call("send_message", { chat_id: GROUP.id, text: "Noted, reminder set." });
+    await call("sendMessage", { chat_id: GROUP.id, text: "Noted, reminder set." });
 
-    const res = await call("history_messages", { after_seq: 4 });
+    const res = await call("historyMessages", { after_seq: 4 });
     expect(res.text).toContain("#4 Louie's Claude @louietyj_claude_bot (9010651977) [bot, sent via gateway by duet]: Noted, reminder set.");
     expect(res.text).toContain("(caught up; next after_seq=5)");
 
-    const again = await call("history_messages", { after_seq: 5 });
+    const again = await call("historyMessages", { after_seq: 5 });
     expect(again.text).toBe("No messages.\n\n(caught up; next after_seq=5)");
   });
 
   it("pages by limit and before_message_id", async () => {
-    const res = await call("history_messages", { chat_id: GROUP.id, limit: 1, before_message_id: 3 });
+    const res = await call("historyMessages", { chat_id: GROUP.id, limit: 1, before_message_id: 3 });
     expect(res.text.split("\n")[0]).toContain("#2 ");
   });
 
   it("filters by time", async () => {
-    const res = await call("history_messages", { chat_id: GROUP.id, since: new Date((T0 + 100) * 1000).toISOString() });
+    const res = await call("historyMessages", { chat_id: GROUP.id, since: new Date((T0 + 100) * 1000).toISOString() });
     expect(res.text.split("\n")[0]).toContain("#3 ");
   });
 
   it("shows one message with its reply chain, edits and replies", async () => {
-    const res = await call("history_message", { chat_id: GROUP.id, message_id: 2 });
+    const res = await call("historyMessage", { chat_id: GROUP.id, message_id: 2 });
     expect(res.text).toMatch(/In reply to:\n\[seq 1\].*aurora tour/);
     expect(res.text).toMatch(/Message:\n\[seq 4\].*9:30pm/);
     expect(res.text).toMatch(/Earlier versions:\n\[seq 2\].*Pickup at 9pm/);
@@ -77,21 +77,21 @@ describe("history tools", () => {
 
   it("notes a replied-to message that was never stored", async () => {
     await ingest("message", message({ message_id: 10, text: "yes", reply_to_message: { message_id: 9 } }));
-    const res = await call("history_message", { chat_id: GROUP.id, message_id: 10 });
+    const res = await call("historyMessage", { chat_id: GROUP.id, message_id: 10 });
     expect(res.text).toContain("In reply to:\n#9 (not stored)");
   });
 
   it("lists replies", async () => {
-    const res = await call("history_replies", { chat_id: String(GROUP.id), message_id: 1 });
+    const res = await call("historyReplies", { chat_id: String(GROUP.id), message_id: 1 });
     expect(res.text).toContain("9:30pm");
   });
 
   it("searches text, captions and names; falls back to plain words on bad syntax", async () => {
-    expect((await call("history_search", { query: "moose" })).text).toContain("chat -5595413740 #3");
-    expect((await call("history_search", { query: "aur*" })).text).toContain("#1 ");
-    expect((await call("history_search", { query: "pickup 9:30pm?" })).text).toContain("#2 ");
-    expect((await call("history_search", { query: "Mum", chat_id: GROUP.id })).text.split("\n")).toHaveLength(2);
-    expect((await call("history_search", { query: "zebra" })).text).toBe("No matches.");
+    expect((await call("historySearch", { query: "moose" })).text).toContain("chat -5595413740 #3");
+    expect((await call("historySearch", { query: "aur*" })).text).toContain("#1 ");
+    expect((await call("historySearch", { query: "pickup 9:30pm?" })).text).toContain("#2 ");
+    expect((await call("historySearch", { query: "Mum", chat_id: GROUP.id })).text.split("\n")).toHaveLength(2);
+    expect((await call("historySearch", { query: "zebra" })).text).toBe("No matches.");
   });
 
   it("follows a chat across a group-to-supergroup upgrade", async () => {
@@ -100,15 +100,15 @@ describe("history tools", () => {
     await ingest("message", message({ message_id: 1, chat: supergroup, text: undefined, migrate_from_chat_id: GROUP.id }));
     await ingest("message", message({ message_id: 2, chat: supergroup, text: "after upgrade", from: LOUIE }));
 
-    const res = await call("history_messages", { chat_id: supergroup.id });
+    const res = await call("historyMessages", { chat_id: supergroup.id });
     expect(res.text).toContain("aurora tour");
     expect(res.text).toContain("after upgrade");
   });
 
   it("resolves @usernames and reports unknown ones", async () => {
     await ingest("channel_post", message({ chat: { id: -1009, type: "channel", title: "News", username: "news" }, from: undefined, text: "x" }));
-    expect((await call("history_messages", { chat_id: "@News" })).text).toContain("News @news (-1009)");
-    const res = await call("history_messages", { chat_id: "@nobody" });
+    expect((await call("historyMessages", { chat_id: "@News" })).text).toContain("News @news (-1009)");
+    const res = await call("historyMessages", { chat_id: "@nobody" });
     expect(res.isError).toBe(true);
     expect(res.text).toMatch(/No known chat/);
   });

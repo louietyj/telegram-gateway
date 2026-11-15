@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { FORMATS, findFormat, formatIndex } from "../src/mcp/formats.js";
-import { RICH_MESSAGE_LIMITS } from "../src/mcp/method-registry.js";
+import { FORMATS, findFormat, formatIndex, RICH_MESSAGE_LIMITS } from "../src/mcp/formats.js";
 
 describe("formats", () => {
   it("resolves every topic by its own name", () => {
@@ -45,7 +44,7 @@ describe("formats", () => {
     expect(rich.body).toContain(String(RICH_MESSAGE_LIMITS.media));
 
     // The caption doc must point at rich messages rather than suggest truncating.
-    expect(findFormat("caption")!.body).toContain("send_rich_message");
+    expect(findFormat("caption")!.body).toContain("sendRichMessage");
     // Poll options are objects, the classic mistake.
     expect(findFormat("poll")!.body).toContain("correct_option_ids");
   });
