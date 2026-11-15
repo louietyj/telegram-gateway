@@ -39,6 +39,22 @@ describe("recording what the bot sends", () => {
     ]);
   });
 
+  it("keeps the reply link when an edit's result omits it, as editMessageText's does", async () => {
+    stubTelegram((m, p) => message({
+      message_id: 51, from: BOT, text: p.text,
+      ...(m === "sendMessage" ? { reply_to_message: { message_id: 10 } } : { edit_date: 2 }),
+    }));
+    const { call } = await connect(db);
+
+    await call("sendMessage", { chat_id: GROUP.id, text: "answer", reply_parameters: { message_id: 10 } });
+    await call("editMessageText", { chat_id: GROUP.id, message_id: 51, text_or_rich_message: "answer (edited)" });
+
+    expect(rows("SELECT version, reply_to_message_id FROM messages ORDER BY id")).toEqual([
+      { version: 0, reply_to_message_id: 10 },
+      { version: 1, reply_to_message_id: 10 },
+    ]);
+  });
+
   it("records every message of a media group", async () => {
     stubTelegram(() => [
       message({ message_id: 60, from: BOT, text: undefined, photo: [{ file_id: "a", file_unique_id: "a" }] }),

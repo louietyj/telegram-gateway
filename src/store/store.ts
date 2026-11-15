@@ -89,7 +89,11 @@ export class Store {
            is_bot, outgoing, client, thread_id, reply_to_message_id, kind, text, media,
            update_id, recorded_at, raw)
          SELECT ?1, ?2, COALESCE((SELECT MAX(version) + 1 FROM messages WHERE chat_id = ?1 AND message_id = ?2), 0),
-           ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18`
+           ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+           -- editMessageText's result omits reply_to_message: keep the earlier version's links.
+           COALESCE(?11, (SELECT thread_id FROM messages WHERE chat_id = ?1 AND message_id = ?2 ORDER BY version DESC LIMIT 1)),
+           COALESCE(?12, (SELECT reply_to_message_id FROM messages WHERE chat_id = ?1 AND message_id = ?2 ORDER BY version DESC LIMIT 1)),
+           ?13, ?14, ?15, ?16, ?17, ?18`
       ).bind(
         r.chat_id, r.message_id, r.date, r.edit_date, r.from_id, r.from_name, r.from_username,
         r.is_bot ? 1 : 0, p.outgoing ? 1 : 0, p.client ?? null, r.thread_id, r.reply_to_message_id,
