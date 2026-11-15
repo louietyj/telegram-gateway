@@ -5,7 +5,7 @@ the bot token. Telegram delivers every update to its webhook, which stores it in
 through it over MCP (stateless Streamable HTTP), and everything the bot sends through it is stored too. The
 Bot API itself has no history, so this store is the only record of the chats.
 
-The Bot API tools come from [grammy-mcp](https://github.com/louietyj/grammyjs-mcp), which generates one tool per
+The Bot API tools come from [grammy-mcp](https://github.com/louietyj/grammy-mcp) (npm `grammy-mcp`), which generates one tool per
 method of grammY's `Api`; calls go through grammY with auto-retry. (The repo started as a fork of
 [EngDawood/telegram-mcp-worker](https://github.com/EngDawood/telegram-mcp-worker) at `c3e8ba1`, whose
 hand-written tool registry this replaced.)
