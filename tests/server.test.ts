@@ -14,6 +14,11 @@ describe("tool list", () => {
     for (const name of BLOCKED_TOOLS) expect(names.has(name), name).toBe(false);
   });
 
+  it("documents the history cursor and the stream in its instructions", async () => {
+    const { client } = await connect(testDb());
+    expect(client.getInstructions()).toMatch(/after_seq[\s\S]*\/stream[\s\S]*_gateway_meta/);
+  });
+
   it("refuses blocked tools without calling Telegram", async () => {
     const calls = stubTelegram(() => true);
     const { call } = await connect(testDb());

@@ -21,6 +21,19 @@ export const BLOCKED_TOOLS = [
   "getUpdates", "setWebhook", "deleteWebhook", "logOut", "close", "leaveChat",
 ];
 
+/** Sent at initialize: what a client can't learn from the tool list alone. */
+export const INSTRUCTIONS = `\
+Telegram through a gateway that stores every message both ways. The Bot API has no history; this store is the record.
+
+Reading: historyMessages with after_seq returns everything recorded since that cursor, oldest first (edits are new rows); keep the cursor it reports. Nothing is consumed, so every reader keeps its own. Never getUpdates (blocked).
+
+Watching without polling: open a WebSocket to /stream on the same host as this endpoint (wss://), with the same Authorization header. Read-only.
+- It pushes every update Telegram delivers, verbatim, and every non-get* Bot API call made through the gateway, in seq order. The gateway filters nothing: filter in your client.
+- Query: after_seq=N to resume, since=<unix> to start at a time, neither to start now. This seq is the stream's own, not historyMessages' after_seq.
+- First frame: {"type":"hello","after_seq":N,"latest_seq":M}; seqs up to M are replay, then it's live. Reconnecting with the last seq you saw misses nothing and repeats nothing.
+- {"type":"event","seq","time","source":"telegram","update":{...},"_gateway_meta":{"is_mention","reply_to_from_bot"}}: _gateway_meta is the only thing the gateway adds, and only for updates carrying a message.
+- {"type":"event","seq","time","source":"gateway","client","call":{"method","params","result"}}: the bot's own sends, edits and deletes. Telegram never reports other people's deletes.`;
+
 export interface ServerOptions {
   api: Api;
   token: string;
@@ -109,7 +122,7 @@ export function buildServer(o: ServerOptions): Server {
 
   const server = new Server(
     { name: "telegram-gateway", version: "0.2.0" },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
   );
   server.setRequestHandler(ListToolsRequestSchema, () => ({
     tools: [...botDefinitions, ...[...local.values()].map((t) => t.definition)],
