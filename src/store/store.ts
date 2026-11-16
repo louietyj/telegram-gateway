@@ -1,10 +1,11 @@
+import { InputFile } from "grammy";
 import { D1Like, D1StatementLike } from "./db.js";
 import { chatRow, isMessage, messageRow } from "./normalize.js";
 
 type Json = Record<string, unknown>;
 
 /** Update fields that carry a Message we store. */
-const MESSAGE_UPDATE_FIELDS = [
+export const MESSAGE_UPDATE_FIELDS = [
   "message", "edited_message", "channel_post", "edited_channel_post",
   "business_message", "edited_business_message",
 ] as const;
@@ -19,18 +20,33 @@ export interface Provenance {
 
 const now = () => Math.floor(Date.now() / 1000);
 
+/** A call's params, with uploaded files reduced to their names (InputFile.toJSON throws). */
+function withoutFiles(value: unknown): unknown {
+  if (value instanceof InputFile) return { input_file: value.filename ?? null };
+  if (Array.isArray(value)) return value.map(withoutFiles);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, withoutFiles(v)]));
+  }
+  return value;
+}
+
 export class Store {
-  constructor(private db: D1Like) {}
+  /** `onEvent` runs after anything is added to the event stream. */
+  constructor(private db: D1Like, private onEvent?: () => void) {}
 
   /** Store one webhook/backfill update. Idempotent: a redelivered update changes nothing. */
   async ingestUpdate(update: Json, source: "webhook" | "backfill"): Promise<void> {
     const updateId = update.update_id;
     if (typeof updateId !== "number") throw new Error("update has no update_id");
+    const raw = JSON.stringify(update);
 
     const statements: D1StatementLike[] = [
       this.db.prepare(
         "INSERT OR IGNORE INTO updates (update_id, received_at, source, raw) VALUES (?, ?, ?, ?)"
-      ).bind(updateId, now(), source, JSON.stringify(update)),
+      ).bind(updateId, now(), source, raw),
+      this.db.prepare(
+        "INSERT OR IGNORE INTO events (recorded_at, source, update_id, payload) VALUES (?, 'telegram', ?, ?)"
+      ).bind(now(), updateId, raw),
     ];
 
     for (const field of MESSAGE_UPDATE_FIELDS) {
@@ -49,20 +65,37 @@ export class Store {
     }
 
     await this.db.batch(statements); // one transaction
+    this.onEvent?.();
   }
 
-  /** Record messages the bot sent or edited through the Worker (a Bot API result). */
-  async recordOutgoing(result: unknown, client: string | null): Promise<void> {
-    const messages = (Array.isArray(result) ? result : [result]).filter(isMessage);
-    if (messages.length === 0) return;
-    await this.db.batch(messages.flatMap((m) => this.messageStatements(m, { outgoing: true, client })));
-  }
+  /**
+   * Record a successful Bot API call made through the Worker: sends and edits as messages,
+   * deletes as deletions, and every call but the read-only get* ones as a stream event.
+   */
+  async recordCall(method: string, params: Json, result: unknown, client: string | null): Promise<void> {
+    const statements: D1StatementLike[] = [];
+    if (method === "deleteMessage" || method === "deleteMessages") {
+      const ids = (method === "deleteMessage" ? [params.message_id] : (params.message_ids as unknown[])).map(Number);
+      const chatId = Number(params.chat_id);
+      if (Number.isFinite(chatId) && ids.length > 0) {
+        statements.push(this.db.prepare(
+          `UPDATE messages SET deleted_at = ? WHERE chat_id = ? AND message_id IN (${ids.map(() => "?").join(",")})`
+        ).bind(now(), chatId, ...ids));
+      }
+    } else {
+      const messages = (Array.isArray(result) ? result : [result]).filter(isMessage);
+      statements.push(...messages.flatMap((m) => this.messageStatements(m, { outgoing: true, client })));
+    }
 
-  async markDeleted(chatId: number, messageIds: number[]): Promise<void> {
-    if (messageIds.length === 0) return;
-    await this.db.prepare(
-      `UPDATE messages SET deleted_at = ? WHERE chat_id = ? AND message_id IN (${messageIds.map(() => "?").join(",")})`
-    ).bind(now(), chatId, ...messageIds).run();
+    const isEvent = !method.startsWith("get");
+    if (isEvent) {
+      statements.push(this.db.prepare(
+        "INSERT INTO events (recorded_at, source, client, payload) VALUES (?, 'gateway', ?, ?)"
+      ).bind(now(), client, `{"method":${JSON.stringify(method)},"params":${JSON.stringify(withoutFiles(params) ?? null)},"result":${JSON.stringify(result ?? null)}}`));
+    }
+    if (statements.length === 0) return;
+    await this.db.batch(statements);
+    if (isEvent) this.onEvent?.();
   }
 
   private chatUpsert(chat: Json): D1StatementLike {

@@ -15,6 +15,15 @@ database_name = "telegram-gateway"
 database_id = "5f55f7a0-d62f-4afa-add1-8b5659d45909"
 migrations_dir = "migrations"
 
+# Holds the /stream WebSockets (src/stream/durable.ts).
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "StreamHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["StreamHub"]
+
 # Secrets (never commit real values):
 #   wrangler secret put TELEGRAM_BOT_TOKEN
 #   wrangler secret put MCP_AUTH_TOKEN

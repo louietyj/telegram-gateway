@@ -16,7 +16,23 @@ hand-written tool registry this replaced.)
 |---|---|---|
 | `POST /mcp` | `Authorization: Bearer $MCP_AUTH_TOKEN` | MCP. Optional `X-Client-Name` is recorded on what that client sends. |
 | `POST /webhook` | Telegram's secret-token header | Update ingest |
+| `GET /stream` | `Authorization: Bearer $MCP_AUTH_TOKEN` | WebSocket of the event stream (below) |
 | `GET/POST/DELETE /admin/webhook` | `Authorization: Bearer $ADMIN_TOKEN` | Show, set or remove the webhook |
+
+## Event stream
+
+`/stream` pushes, one JSON frame each, every update Telegram delivers (verbatim) and every non-`get*` Bot API
+call made through the Worker, in `seq` order. The gateway filters nothing; clients do.
+
+- Connect with `?after_seq=N` to resume, `?since=<unix>` to start at a time, or neither to start now.
+  The first frame is `{"type":"hello","after_seq":N,"latest_seq":M}`; seqs up to `M` are replay, then it's live.
+  Each socket's cursor moves only as frames are sent, so a reconnect with the last seq seen misses nothing
+  and repeats nothing.
+- `{"type":"event","seq","time","source":"telegram","update":{…},"_gateway_meta":{"is_mention","reply_to_from_bot"}}`:
+  `_gateway_meta` is the only thing the gateway adds, and only for updates carrying a message.
+- `{"type":"event","seq","time","source":"gateway","client","call":{"method","params","result"}}`: uploaded
+  files in `params` appear as `{"input_file": <name>}`.
+- A Durable Object (`StreamHub`) holds the sockets with the hibernation API, poked after each write.
 
 ## Tools
 

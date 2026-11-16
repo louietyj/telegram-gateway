@@ -34,21 +34,14 @@ export interface ServerOptions {
 
 /**
  * Bot messages never come back as updates, so every successful call through `api` is
- * recorded: sends and edits as messages, deletes as deletions.
+ * recorded (Store.recordCall).
  */
 function recordOutgoing(api: Api, o: ServerOptions, failures: string[]): void {
   api.config.use(async (prev, method, payload, signal) => {
     const response = await prev(method, payload, signal);
     if (!response.ok) return response;
-    const p = payload as Record<string, unknown>;
     try {
-      if (method === "deleteMessage" || method === "deleteMessages") {
-        const ids = method === "deleteMessage" ? [p.message_id] : (p.message_ids as unknown[]);
-        const chatId = Number(p.chat_id);
-        if (Number.isFinite(chatId)) await o.store.markDeleted(chatId, ids.map(Number));
-      } else {
-        await o.store.recordOutgoing(response.result, o.clientName);
-      }
+      await o.store.recordCall(method, payload as Record<string, unknown>, response.result, o.clientName);
     } catch (error) {
       failures.push((error as Error).message);
     }
